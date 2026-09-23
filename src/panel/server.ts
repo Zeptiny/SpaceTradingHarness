@@ -110,16 +110,18 @@ export function startPanel(): void {
       list.push(s.symbol);
       shipAt.set(s.nav.waypointSymbol, list);
     }
-    const systems = mirror.listPrefix<{ symbol: string; x: number; y: number }>(storeKeys.system("").slice(0, -1))
-      .filter(e => e.key.includes(":") && !e.key.startsWith("system-waypoints:"))
-      .map(e => e.value);
+    const systemsBySymbol = new Map<string, Pick<System, "symbol"> & Partial<Pick<System, "x" | "y">>>();
+    for (const entry of mirror.listPrefix<System>(storeKeys.system("").slice(0, -1))) {
+      if (entry.key.includes(":") && !entry.key.startsWith("system-waypoints:")) systemsBySymbol.set(entry.value.symbol, entry.value);
+    }
     const waypointsBySystem = new Map<string, (Waypoint & { ships?: string[] })[]>();
     for (const entry of mirror.listPrefix<Waypoint[]>("system-waypoints:")) {
       const system = entry.key.split(":")[1] ?? "";
       waypointsBySystem.set(system, entry.value.map(w => ({ ...w, ships: shipAt.get(w.symbol) ?? [] })));
+      if (!systemsBySymbol.has(system)) systemsBySymbol.set(system, { symbol: system });
     }
     res.json({
-      systems,
+      systems: [...systemsBySymbol.values()].sort((a, b) => a.symbol.localeCompare(b.symbol)),
       waypointsBySystem: Object.fromEntries(waypointsBySystem),
       inTransit: (fleet?.ships ?? [])
         .filter(s => s.nav.status === "IN_TRANSIT")
