@@ -41,8 +41,8 @@ class Scheduler {
       x => x.scope === w.scope && Math.abs(x.at - w.at) <= config.agent.minWakeGapMs,
     );
     if (dup) {
-      dup.at = Math.min(dup.at, w.at);
-      dup.reason = w.reason;
+      dup.at = Math.max(dup.at, w.at);
+      dup.reason = dup.reason === w.reason ? dup.reason : `${dup.reason}; ${w.reason}`;
     } else {
       this.wakeups.push(w);
     }

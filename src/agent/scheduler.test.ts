@@ -13,17 +13,20 @@ test("same-scope wakeups within the gap merge into one entry", () => {
   scheduler.schedule(Date.now() + 1_000 + gap / 2, "in transit; will mine on arrival", scope);
   assert.equal(of(scope).length, before + 1);
   const merged = of(scope).at(-1)!;
+  assert.match(merged.reason, /wake at arrival/);
   assert.match(merged.reason, /mine on arrival/);
 });
 
-test("merged entry keeps the earliest wake time and newest reason", () => {
-  const scope = "ship-earliest";
-  scheduler.schedule(Date.now() + 1_000, "first-scheduled", scope);
-  scheduler.schedule(Date.now() + 1_000 - gap / 2, "newest assertion", scope);
+test("merged entry keeps the latest wake time and merges reasons", () => {
+  const scope = "ship-latest";
+  const t = Date.now();
+  scheduler.schedule(t + 1_000, "first-scheduled", scope);
+  scheduler.schedule(t + 1_000 + gap / 2, "latest assertion", scope);
   assert.equal(of(scope).length, 1);
   const merged = of(scope)[0]!;
-  assert.match(merged.reason, /newest assertion/);
-  assert.ok(merged.at < Date.now() + 1_000);
+  assert.match(merged.reason, /first-scheduled/);
+  assert.match(merged.reason, /latest assertion/);
+  assert.ok(merged.at >= t + 1_000 + gap / 2);
 });
 
 test("same-scope wakeups further apart than the gap stay separate", () => {

@@ -29,11 +29,11 @@ export const config = {
   agent: {
     policy: (process.env.AGENT_POLICY === "readonly" ? "readonly" : "full") as AgentPolicy,
     maxActionsPerWake: num("AGENT_MAX_ACTIONS_PER_WAKE", 8),
-    maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 12),
+    maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 32),
     maxConcurrentTools: num("AGENT_MAX_CONCURRENT_TOOLS", 3),
     wakeTimeoutMs: num("AGENT_WAKE_TIMEOUT_MS", 180_000),
     fallbackWakeMs: num("AGENT_FALLBACK_WAKE_MS", 10 * 60_000),
-    minWakeGapMs: num("AGENT_MIN_WAKE_GAP_MS", 10_000),
+    minWakeGapMs: num("AGENT_MIN_WAKE_GAP_MS", 60_000),
   },
   transport: {
     minIntervalMs: num("TRANSPORT_MIN_INTERVAL_MS", 600),
