@@ -223,8 +223,6 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
     let actionsLeft = config.agent.maxActionsPerWake;
     let consecutiveFailures = 0;
     let noCallRounds = 0;
-    const wakeStart = Date.now();
-
     const runCall = async (call: PlannedCall): Promise<ExecOutcome> => {
       const def = getTool(call.tool);
       if (def?.kind !== "read") return executeTool(call.tool, call.args ?? {});
@@ -247,10 +245,6 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
 
     let round = 0;
     while (round < config.agent.maxRoundsPerWake && actionsLeft > 0) {
-      if (Date.now() - wakeStart > config.agent.wakeTimeoutMs) {
-        activity.append({ kind: "system", text: `wake wall-clock budget (${config.agent.wakeTimeoutMs}ms) exhausted` });
-        break;
-      }
       // Working memory seeds the conversation once per wake; afterwards the
       // conversation itself carries everything asked and learned, and live
       // state arrives via tool results.

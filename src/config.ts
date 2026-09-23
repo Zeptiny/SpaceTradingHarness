@@ -31,7 +31,6 @@ export const config = {
     maxActionsPerWake: num("AGENT_MAX_ACTIONS_PER_WAKE", 8),
     maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 32),
     maxConcurrentTools: num("AGENT_MAX_CONCURRENT_TOOLS", 3),
-    wakeTimeoutMs: num("AGENT_WAKE_TIMEOUT_MS", 180_000),
     fallbackWakeMs: num("AGENT_FALLBACK_WAKE_MS", 10 * 60_000),
     minWakeGapMs: num("AGENT_MIN_WAKE_GAP_MS", 60_000),
   },
