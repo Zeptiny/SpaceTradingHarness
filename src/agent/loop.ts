@@ -221,7 +221,6 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
     const readCache = new Map<string, unknown>();
     let plan: AgentPlan | null = null;
     let actionsLeft = config.agent.maxActionsPerWake;
-    let consecutiveFailures = 0;
     let noCallRounds = 0;
     const runCall = async (call: PlannedCall): Promise<ExecOutcome> => {
       const def = getTool(call.tool);
@@ -331,15 +330,8 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       ).length;
       actionsLeft -= spent;
 
-      const allFailed = roundOutcomes.length > 0 && roundOutcomes.every(o => o.outcome !== "ok");
-      consecutiveFailures = allFailed ? consecutiveFailures + 1 : 0;
-
       round++;
       if (ended) break;
-      if (consecutiveFailures >= 2) {
-        activity.append({ kind: "system", text: "loop stopped: two consecutive rounds with zero successes" });
-        break;
-      }
     }
 
     const text = summarizeWake(outcomes);
