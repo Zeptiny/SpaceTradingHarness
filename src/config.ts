@@ -28,7 +28,7 @@ export const config = {
   dataDir: path.resolve(process.env.DATA_DIR ?? "data"),
   agent: {
     policy: (process.env.AGENT_POLICY === "readonly" ? "readonly" : "full") as AgentPolicy,
-    maxActionsPerWake: num("AGENT_MAX_ACTIONS_PER_WAKE", 8),
+    maxActionsPerWake: num("AGENT_MAX_ACTIONS_PER_WAKE", 32),
     maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 32),
     maxConcurrentTools: num("AGENT_MAX_CONCURRENT_TOOLS", 3),
     fallbackWakeMs: num("AGENT_FALLBACK_WAKE_MS", 10 * 60_000),

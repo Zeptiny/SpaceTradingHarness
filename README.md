@@ -20,17 +20,30 @@ npm install
 npm run codegen       # regenerate src/generated from openapi.json
 npm run typecheck
 npm run check:arch    # import-boundary enforcement
+npm test              # unit tests (no .env needed for the pure ones)
 npm run smoke         # API + LLM round-trip test (read-only)
 npm start             # harness + panel at http://127.0.0.1:8787
+npm run demo          # panel only, on fixture data + simulated wakes — no token, no API/LLM calls (http://127.0.0.1:8790)
 ```
 
 Requires `.env` with `API_TOKEN`, `OPENAI_API_URL`, `OPENAI_API_KEY`, `LLM_MODEL`.
 
-Env knobs (optional): `AGENT_POLICY=readonly` (block all mutating tools), `AGENT_MAX_ACTIONS_PER_WAKE`, `AGENT_MAX_ROUNDS_PER_WAKE`, `AGENT_MAX_CONCURRENT_TOOLS`, `AGENT_WAKE_TIMEOUT_MS`, `AGENT_FALLBACK_WAKE_MS`, `AGENT_MIN_WAKE_GAP_MS`, `PANEL_PORT`, `PANEL_HOST` (default 127.0.0.1), `TRANSPORT_MIN_INTERVAL_MS`, `TRANSPORT_TIMEOUT_MS`, `LLM_TIMEOUT_MS`.
+Env knobs (optional): `AGENT_POLICY=readonly` (block all mutating tools), `AGENT_MAX_ACTIONS_PER_WAKE`, `AGENT_MAX_ROUNDS_PER_WAKE`, `AGENT_MAX_CONCURRENT_TOOLS`, `AGENT_FALLBACK_WAKE_MS`, `AGENT_MIN_WAKE_GAP_MS`, `PANEL_PORT`, `PANEL_HOST` (default 127.0.0.1), `TRANSPORT_MIN_INTERVAL_MS`, `TRANSPORT_TIMEOUT_MS`, `LLM_TIMEOUT_MS`.
 
 ## Panel
 
-`http://127.0.0.1:8787` — localhost-only (Host/Origin validated). Pages: Dashboard, Fleet, Map (per-system waypoint plot with ship positions), Markets (price history), Contracts (progress board), Activity (auditable tool-call log), Summaries (loop digests), Agent (pause/resume/wake/directive + tool catalog), Memory (agent notes + goals), Settings.
+`http://127.0.0.1:8787` — localhost-only (Host/Origin validated). Plain HTML/CSS/JS in `src/panel/public/`, no build step; live over one SSE stream. An always-visible status strip shows whether the agent is executing (wake/round), standing by (next wake countdown) or paused, plus credits, API budget and LLM token use.
+
+- **Overview** — fleet/contract/wake/LLM tiles, credits chart, the agent's current thought, alerts (low fuel, deadlines, failing wakes, LLM errors), recent wakes.
+- **Fleet** — per-ship route progress + ETA, fuel/cargo, cooldown, inventory, last action.
+- **Activity** — every wake as a transcript: the agent's reasoning between rounds, each tool call (guards, args, result, real request count), and its end-of-wake summary with duration/requests/tokens/credit delta.
+- **Map** — pan/zoom system map: waypoint types, markets, orbitals, parked ships and in-transit ships moving along their routes.
+- **Markets** — trade opportunities (best buy→sell pair per good, with data age) and a market browser with supply levels and price trends.
+- **Contracts** — active / offered / closed board with delivery progress and live deadlines.
+- **Memory** — goals (add/complete) and the agent's notes.
+- **Agent** — pause/resume/wake, directive, scheduled wakeups, runtime config + LLM usage, tool catalog.
+
+Run `npm run demo` to work on the panel without a token.
 
 ## Regenerating docs
 

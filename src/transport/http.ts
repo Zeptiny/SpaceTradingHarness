@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { config } from "../config.js";
 import { bus } from "../events/bus.js";
 import { runtime } from "../state/runtime.js";
@@ -35,6 +36,14 @@ export interface ApiResult<T> {
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+// Counts the HTTP requests actually sent inside `countRequests(counter, fn)` —
+// including retries and guard reads — so the activity log reports real spend.
+const requestCounter = new AsyncLocalStorage<{ n: number }>();
+
+export function countRequests<T>(counter: { n: number }, fn: () => Promise<T>): Promise<T> {
+  return requestCounter.run(counter, fn);
+}
+
 class Transport {
   rate: RateState = { limit: null, remaining: null, resetAt: null, lastRequestAt: 0 };
   private queue: Promise<unknown> = Promise.resolve();
@@ -69,6 +78,9 @@ class Transport {
     let attempt = 0;
     for (;;) {
       await this.pace();
+      const counter = requestCounter.getStore();
+      if (counter) counter.n++;
+      runtime.requestsTotal++;
       let res: Response;
       try {
         res = await fetch(url, {

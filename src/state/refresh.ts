@@ -1,5 +1,5 @@
 import { transport } from "../transport/http.js";
-import { mirror, storeKeys, type FleetState } from "./store.js";
+import { mirror, observeAgent, storeKeys, type FleetState } from "./store.js";
 import { prices } from "./prices.js";
 import type { Agent, Contract, Market, Ship } from "../generated/types.js";
 
@@ -34,7 +34,7 @@ export async function paginate<T>(
 export async function refreshAgent(): Promise<Agent | undefined> {
   try {
     const { data } = await transport.request<Agent>("getMyAgent");
-    mirror.set(storeKeys.agent, data);
+    observeAgent(data);
     return data;
   } catch (err) {
     console.error("[refresh] agent failed:", err instanceof Error ? err.message : err);

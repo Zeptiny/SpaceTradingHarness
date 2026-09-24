@@ -1,5 +1,6 @@
-import type { Agent, Market, Ship, ShipNavStatus, Waypoint } from "../generated/types.js";
+import type { Agent, Market, Ship, ShipNavFlightMode, ShipNavStatus, Waypoint } from "../generated/types.js";
 import { systemOf } from "../utils/symbols.js";
+import { distance, fuelCost } from "../utils/nav.js";
 
 /**
  * Fresh state reader. Implementations fetch live from the API (memoized per
@@ -26,6 +27,12 @@ export interface GuardResult {
 
 export type Guard = (name: string, ctx: GuardContext) => Promise<GuardResult>;
 
+// Factory-built guards are anonymous arrows; give them a readable name for
+// the activity log ("guard inOrbit: …" instead of "guard : …").
+function named(name: string, guard: Guard): Guard {
+  return Object.defineProperty(guard, "name", { value: name });
+}
+
 function shipSymbolFromArgs(ctx: GuardContext): string | null {
   const s = ctx.args["shipSymbol"];
   return typeof s === "string" ? s : null;
@@ -46,17 +53,17 @@ export const knownShip: Guard = async (_name, ctx) => {
   return "error" in r ? r.error : { ok: true };
 };
 
-const navStatus = (expected: ShipNavStatus): Guard => async (_name, ctx) => {
+const navStatus = (guardName: string, expected: ShipNavStatus): Guard => named(guardName, async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;
   if (r.ship.nav.status !== expected) {
     return { ok: false, reason: `${r.symbol} nav status is ${r.ship.nav.status}, need ${expected}` };
   }
   return { ok: true };
-};
+});
 
-export const isDocked = navStatus("DOCKED");
-export const inOrbit = navStatus("IN_ORBIT");
+export const isDocked = navStatus("isDocked", "DOCKED");
+export const inOrbit = navStatus("inOrbit", "IN_ORBIT");
 
 export const notInTransit: Guard = async (_name, ctx) => {
   const r = await requireShip(ctx);
@@ -77,32 +84,32 @@ export const cooldownClear: Guard = async (_name, ctx) => {
   return { ok: true };
 };
 
-export const shipHasMount = (mountPrefix: string): Guard => async (_name, ctx) => {
+export const shipHasMount = (mountPrefix: string): Guard => named(`shipHasMount(${mountPrefix})`, async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;
   if (!r.ship.mounts.some(m => m.symbol.startsWith(mountPrefix))) {
     return { ok: false, reason: `${r.symbol} has no ${mountPrefix} mount` };
   }
   return { ok: true };
-};
+});
 
-export const shipHasModule = (modulePrefix: string): Guard => async (_name, ctx) => {
+export const shipHasModule = (...modulePrefixes: string[]): Guard => named(`shipHasModule(${modulePrefixes.join("|")})`, async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;
-  if (!r.ship.modules.some(m => m.symbol.startsWith(modulePrefix))) {
-    return { ok: false, reason: `${r.symbol} has no ${modulePrefix} module` };
+  if (!r.ship.modules.some(m => modulePrefixes.some(p => m.symbol.startsWith(p)))) {
+    return { ok: false, reason: `${r.symbol} has no ${modulePrefixes.join(" / ")} module` };
   }
   return { ok: true };
-};
+});
 
-export const cargoHasRoom = (unitsArg = "units"): Guard => async (_name, ctx) => {
+export const cargoHasRoom = (unitsArg = "units"): Guard => named("cargoHasRoom", async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;
   const units = Number(ctx.args[unitsArg] ?? 0);
   const free = r.ship.cargo.capacity - r.ship.cargo.units;
   if (units > free) return { ok: false, reason: `only ${free} cargo space free, need ${units}` };
   return { ok: true };
-};
+});
 
 export const cargoHasGood: Guard = async (_name, ctx) => {
   const r = await requireShip(ctx);
@@ -117,7 +124,7 @@ export const cargoHasGood: Guard = async (_name, ctx) => {
   return { ok: true };
 };
 
-export const waypointHasTrait = (trait: string): Guard => async (_name, ctx) => {
+export const waypointHasTrait = (trait: string): Guard => named(`waypointHasTrait(${trait})`, async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;
   const wSym = r.ship.nav.waypointSymbol;
@@ -127,12 +134,12 @@ export const waypointHasTrait = (trait: string): Guard => async (_name, ctx) => 
     return { ok: false, reason: `${wSym} lacks ${trait}` };
   }
   return { ok: true };
-};
+});
 
 // Market side check using the API's own semantics:
 // EXPORT = market sells (agent can buy), IMPORT = market buys (agent can sell),
 // EXCHANGE = both. Also verifies the market IS the ship's current waypoint.
-export const marketTrades = (mode: "sell" | "buy"): Guard => async (_name, ctx) => {
+export const marketTrades = (mode: "sell" | "buy"): Guard => named(mode === "buy" ? "marketSells" : "marketBuys", async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;
   const symbol = ctx.args["symbol"];
@@ -148,7 +155,7 @@ export const marketTrades = (mode: "sell" | "buy"): Guard => async (_name, ctx) 
   if (mode === "sell" && !canSellTo) return { ok: false, reason: `${wSym} is ${t} for ${symbol} — does not buy it` };
   if (mode === "buy" && !canBuyFrom) return { ok: false, reason: `${wSym} is ${t} for ${symbol} — does not sell it` };
   return { ok: true };
-};
+});
 
 export const marketSellsFuel: Guard = async (_name, ctx) => {
   const r = await requireShip(ctx);
@@ -177,14 +184,17 @@ export const hasFuelForRoute: Guard = async (_name, ctx) => {
   if (!from || !to) {
     return { ok: false, reason: "waypoint data unavailable for route check" };
   }
-  const dist = Math.hypot(to.x - from.x, to.y - from.y);
-  if (ship.fuel.capacity > 0 && ship.fuel.current < dist) {
-    return { ok: false, reason: `fuel ${ship.fuel.current}/${ship.fuel.capacity} < distance ${Math.round(dist)} — refuel first` };
+  const modeArg = ctx.args["flightMode"];
+  const mode = (typeof modeArg === "string" ? modeArg : ship.nav.flightMode) as ShipNavFlightMode;
+  const need = fuelCost(distance(from, to), mode);
+  if (ship.fuel.capacity > 0 && ship.fuel.current < need) {
+    const hint = mode === "DRIFT" ? "" : " — refuel first, or use flightMode DRIFT (1 fuel, slow)";
+    return { ok: false, reason: `fuel ${ship.fuel.current}/${ship.fuel.capacity} < ${need} needed (${mode})${hint}` };
   }
   return { ok: true };
 };
 
-export const hasCredits = (min: number): Guard => async (_name, ctx) => {
+export const hasCredits = (min: number): Guard => named("hasCredits", async (_name, ctx) => {
   let agent: Agent | undefined;
   try {
     agent = await ctx.fresh.agent();
@@ -194,4 +204,4 @@ export const hasCredits = (min: number): Guard => async (_name, ctx) => {
   if (!agent) return { ok: true, reason: "credit balance unknown (allowed)" };
   if (agent.credits < min) return { ok: false, reason: `credits ${agent.credits} < required ${min}` };
   return { ok: true };
-};
+});

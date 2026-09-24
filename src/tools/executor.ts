@@ -2,9 +2,9 @@ import { config } from "../config.js";
 import { bus } from "../events/bus.js";
 import { activity } from "../state/activity.js";
 import { api } from "../client/index.js";
-import { mergeSystemWaypoints, mirror, storeKeys, upsertShip } from "../state/store.js";
+import { mergeSystemWaypoints, mirror, observeAgent, storeKeys, upsertShip } from "../state/store.js";
 import { prices } from "../state/prices.js";
-import { SpaceTradersError } from "../transport/http.js";
+import { countRequests, SpaceTradersError } from "../transport/http.js";
 import { getTool, type ToolContext } from "./registry.js";
 import type { FreshReader, GuardResult } from "../guards/index.js";
 import type { Market, Ship, Waypoint } from "../generated/types.js";
@@ -110,7 +110,7 @@ function makeFreshReader(): FreshReader {
     }),
     agent: async () => {
       const { data } = await api.myAgent();
-      mirror.set(storeKeys.agent, data);
+      observeAgent(data);
       return data;
     },
   };
@@ -142,47 +142,58 @@ export async function executeTool(name: string, rawArgs: unknown): Promise<ExecO
   const guardResults: { guard: string; ok: boolean; reason?: string | undefined }[] = [];
   const fresh = makeFreshReader();
   const shipSymbol = typeof args["shipSymbol"] === "string" ? (args["shipSymbol"] as string) : null;
-  let unlock: (() => void) | null = null;
+  const requests = { n: 0 };
+  const lock: { release?: () => void } = {};
   const started = Date.now();
   try {
-    // Lock first, then guards: guards fetch live state, so they must run
-    // inside the ship's critical section or a queued call would validate
-    // against pre-action state.
-    if (shipSymbol) unlock = await shipLock(shipSymbol);
-    if (tool.guards?.length) {
-      for (const guard of tool.guards) {
+    return await countRequests(requests, async () => {
+      // Lock first, then guards: guards fetch live state, so they must run
+      // inside the ship's critical section or a queued call would validate
+      // against pre-action state.
+      if (shipSymbol) lock.release = await shipLock(shipSymbol);
+      for (const guard of tool.guards ?? []) {
         const g: GuardResult = await guard(tool.name, { args, fresh });
         guardResults.push({ guard: guard.name, ok: g.ok, reason: g.reason });
         if (!g.ok) {
           bus.emit({ type: "GuardFailed", ts: Date.now(), tool: name, guard: guard.name, reason: g.reason ?? "" });
           return recordActivityOutcome(
             { tool: name, outcome: "guard-rejected", summary: `guard ${guard.name}: ${g.reason}` },
-            name, args, guardResults, 0, 0,
+            name, args, guardResults, requests.n, Date.now() - started,
           );
         }
       }
-    }
-    const res = await tool.handler(args, { shipLock, fresh });
-    return recordActivityOutcome(
-      {
-        tool: name,
-        outcome: "ok",
-        summary: res.summary,
-        result: res.result,
-        followUpWakeAt: res.followUpWakeAt,
-        followUpReason: res.followUpReason,
-      },
-      name, args, guardResults, tool.rateCost, Date.now() - started,
-    );
+      const res = await tool.handler(args, { shipLock, fresh });
+      return recordActivityOutcome(
+        {
+          tool: name,
+          outcome: "ok",
+          summary: res.summary,
+          result: res.result,
+          followUpWakeAt: res.followUpWakeAt,
+          followUpReason: res.followUpReason,
+        },
+        name, args, guardResults, requests.n, Date.now() - started,
+      );
+    });
   } catch (err) {
-    const summary = err instanceof Error ? err.message : String(err);
     return recordActivityOutcome(
-      { tool: name, outcome: "api-error", summary },
-      name, args, guardResults, tool.rateCost, Date.now() - started,
+      { tool: name, outcome: "api-error", summary: errorSummary(err) },
+      name, args, guardResults, requests.n, Date.now() - started,
     );
   } finally {
-    unlock?.();
+    lock.release?.();
   }
+}
+
+// SpaceTraders puts the actionable detail (fuel required, cooldown left, …)
+// in error.data — pass it through so the agent can adapt without re-reading.
+function errorSummary(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (err instanceof SpaceTradersError && err.data !== undefined) {
+    const data = JSON.stringify(err.data);
+    return `${msg} — data: ${data.length > 400 ? data.slice(0, 400) + "…" : data}`;
+  }
+  return msg;
 }
 
 function recordActivityOutcome(
@@ -198,7 +209,8 @@ function recordActivityOutcome(
     tool,
     args,
     outcome: outcome.outcome,
-    result: outcome.outcome === "ok" ? outcome.result : outcome.summary,
+    summary: outcome.summary,
+    result: outcome.outcome === "ok" ? outcome.result : undefined,
     guards,
     requestsSpent: requests,
     durationMs,
