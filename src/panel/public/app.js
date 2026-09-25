@@ -87,6 +87,36 @@ const ICON = {
 };
 const icon = (name, cls = "") => `<svg class="${cls}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICON[name] ?? ""}</svg>`;
 
+// Live updates go through patch() instead of innerHTML. Rewriting innerHTML
+// rebuilds every node, which replays the `.mount` fade-in on cards, restarts
+// CSS transitions and animations, and drops hover state — the panel looks like
+// it keeps reloading. patch() skips identical markup and otherwise morphs the
+// existing DOM in place, touching only the nodes and attributes that changed.
+const lastMarkup = new WeakMap();
+const markupParser = document.createElement("template");
+function patch(el, html) {
+  if (!el || lastMarkup.get(el) === html) return;
+  lastMarkup.set(el, html);
+  const svg = el instanceof SVGElement;
+  markupParser.innerHTML = svg ? `<svg>${html}</svg>` : html;
+  morphChildren(el, svg ? markupParser.content.firstChild : markupParser.content);
+}
+function morphChildren(cur, next) {
+  const olds = [...cur.childNodes], news = [...next.childNodes];
+  news.forEach((n, i) => {
+    const o = olds[i];
+    if (!o) cur.appendChild(n);
+    else if (o.nodeType !== n.nodeType || o.nodeName !== n.nodeName) cur.replaceChild(n, o);
+    else if (o.nodeType === Node.ELEMENT_NODE) { morphAttrs(o, n); morphChildren(o, n); }
+    else if (o.nodeValue !== n.nodeValue) o.nodeValue = n.nodeValue;
+  });
+  for (const o of olds.slice(news.length)) o.remove();
+}
+function morphAttrs(o, n) {
+  for (const { name } of [...o.attributes]) if (!n.hasAttribute(name)) o.removeAttribute(name);
+  for (const { name, value } of n.attributes) if (o.getAttribute(name) !== value) o.setAttribute(name, value);
+}
+
 function toast(msg, bad = false) {
   const el = $("#toast");
   el.textContent = msg;
@@ -149,13 +179,18 @@ async function load(names) {
   await run([...set].filter(n => !ALWAYS.includes(n)));
 }
 
+// Every API call the agent makes emits an event, so during a wake they arrive
+// continuously. Batch them into at most one reload per FLUSH_MS, and hold them
+// while the browser tab is hidden (flushed as soon as it is visible again).
+const FLUSH_MS = 1000;
 const dirty = new Set();
 let flushTimer = null;
 function invalidate(names) {
   const needs = new Set([...ALWAYS, ...(VIEWS[UI.view]?.needs ?? [])]);
   for (const n of names) if (needs.has(n)) dirty.add(n);
-  if (dirty.size && !flushTimer) flushTimer = setTimeout(flush, 300);
+  if (dirty.size && !flushTimer && !document.hidden) flushTimer = setTimeout(flush, FLUSH_MS);
 }
+document.addEventListener("visibilitychange", () => invalidate([]));
 async function flush() {
   flushTimer = null;
   const names = [...dirty];
@@ -221,6 +256,11 @@ function niceStep(raw) {
 
 function creditsChart(host, points, fromTs) {
   const w = Math.max(320, host.clientWidth);
+  // Redraw only when the data, range or size changed (or the time axis has
+  // moved a minute), so the chart doesn't repaint on every live event.
+  const key = `${w}|${Math.round((Date.now() - fromTs) / 60_000)}|${points.length}|${points.at(-1)?.ts}|${points.at(-1)?.credits}|${Math.floor(Date.now() / 60_000)}`;
+  if (host.dataset.key === key) return;
+  host.dataset.key = key;
   const h = 210;
   const pad = { l: 58, r: 14, t: 10, b: 26 };
   const before = points.filter(p => p.ts < fromTs).at(-1);
@@ -352,13 +392,13 @@ function renderChrome() {
     contracts: st ? (n => (n ? `<span class="count">${n}</span>` : ""))(contracts().filter(c => c.accepted && isOpenContract(c)).length) : "",
     memory: S.memory ? `<span class="count">${S.memory.goals.filter(g => g.status === "active").length}</span>` : "",
   };
-  $("#nav").innerHTML = NAV.map(([id, label]) =>
-    `<a href="#/${id}"${UI.view === id ? ' aria-current="page"' : ""}>${icon(id)}<span class="lbl">${label}</span>${counts[id] ?? ""}</a>`).join("");
+  patch($("#nav"), NAV.map(([id, label]) =>
+    `<a href="#/${id}"${UI.view === id ? ' aria-current="page"' : ""}>${icon(id)}<span class="lbl">${label}</span>${counts[id] ?? ""}</a>`).join(""));
 
   // identity + meta
   if (st?.agent) $("#agentIdent").textContent = `${st.agent.symbol} · ${st.agent.headquarters}`;
   if (st) {
-    $("#railMeta").innerHTML = `model <b>${esc(st.config.model)}</b><br>policy <b class="${st.config.policy === "readonly" ? "warn" : ""}">${esc(st.config.policy)}</b><br>requests <b>${esc(fmtInt(st.requestsTotal))}</b> · up <b data-elapsed="${st.startedAt}">${esc(fmtDur(Date.now() - st.startedAt))}</b>`;
+    patch($("#railMeta"), `model <b>${esc(st.config.model)}</b><br>policy <b class="${st.config.policy === "readonly" ? "warn" : ""}">${esc(st.config.policy)}</b><br>requests <b>${esc(fmtInt(st.requestsTotal))}</b> · up <b data-elapsed="${st.startedAt}">${esc(fmtDur(Date.now() - st.startedAt))}</b>`);
   }
 
   // status strip
@@ -379,7 +419,7 @@ function renderChrome() {
   }
   strip.dataset.mode = mode;
   $("#statusTitle").textContent = head;
-  $("#statusSub").innerHTML = sub;
+  patch($("#statusSub"), sub);
 
   const cr = creditsNow();
   $("#stripCredits").textContent = cr == null ? "–" : `${fmtInt(cr)} cr`;
@@ -442,34 +482,34 @@ VIEWS.overview = {
     const fl = ships();
     const by = k => fl.filter(s => s.nav?.status === k).length;
     const segs = [["IN_TRANSIT", "var(--accent)"], ["IN_ORBIT", "var(--cyan)"], ["DOCKED", "var(--blue)"]];
-    $("#tFleet").innerHTML = `<span class="tile-label">Fleet</span><span class="tile-value">${fl.length}<small>ships</small></span>
+    patch($("#tFleet"), `<span class="tile-label">Fleet</span><span class="tile-value">${fl.length}<small>ships</small></span>
       <div class="segbar">${segs.map(([k, c]) => (by(k) ? `<i style="flex:${by(k)};background:${c}"></i>` : "")).join("")}</div>
-      <div class="legend-dots">${segs.map(([k, c]) => `<span><i style="background:${c}"></i>${by(k)} ${title(k)}</span>`).join("")}</div>`;
+      <div class="legend-dots">${segs.map(([k, c]) => `<span><i style="background:${c}"></i>${by(k)} ${title(k)}</span>`).join("")}</div>`);
 
     const open = contracts().filter(c => c.accepted && isOpenContract(c));
     const offers = contracts().filter(c => !c.accepted && isOpenContract(c));
     const payout = open.reduce((a, c) => a + (c.payment?.onFulfilled ?? 0), 0);
     const soonest = open.map(contractDeadline).filter(isNum).sort((a, b) => a - b)[0];
-    $("#tContracts").innerHTML = `<span class="tile-label">Active contracts</span><span class="tile-value">${open.length}${offers.length ? `<small>+${offers.length} offered</small>` : ""}</span>
-      <div class="tile-foot">${payout ? `<span><b class="good">${esc(fmtCompact(payout))}</b> on fulfil</span>` : '<span class="muted">nothing pending</span>'}${soonest ? `<span class="sep">|</span><span>due <b data-cd="${soonest}">${esc(fmtCountdown(soonest))}</b></span>` : ""}</div>`;
+    patch($("#tContracts"), `<span class="tile-label">Active contracts</span><span class="tile-value">${open.length}${offers.length ? `<small>+${offers.length} offered</small>` : ""}</span>
+      <div class="tile-foot">${payout ? `<span><b class="good">${esc(fmtCompact(payout))}</b> on fulfil</span>` : '<span class="muted">nothing pending</span>'}${soonest ? `<span class="sep">|</span><span>due <b data-cd="${soonest}">${esc(fmtCountdown(soonest))}</b></span>` : ""}</div>`);
 
     const day = S.wakes.filter(w => w.ts > Date.now() - 86_400_000);
     const avg = day.length ? day.reduce((a, w) => a + (w.stats?.durationMs ?? 0), 0) / day.length : null;
     const failed = day.reduce((a, w) => a + issuesOf(w), 0);
-    $("#tWakes").innerHTML = `<span class="tile-label">Wakes · 24h</span><span class="tile-value">${day.length}</span>
-      <div class="tile-foot"><span>avg ${esc(fmtDur(avg))}</span><span class="sep">|</span><span class="${failed ? "warn" : ""}">${failed} failed call${failed === 1 ? "" : "s"}</span></div>`;
+    patch($("#tWakes"), `<span class="tile-label">Wakes · 24h</span><span class="tile-value">${day.length}</span>
+      <div class="tile-foot"><span>avg ${esc(fmtDur(avg))}</span><span class="sep">|</span><span class="${failed ? "warn" : ""}">${failed} failed call${failed === 1 ? "" : "s"}</span></div>`);
 
     const llm = st.llm;
-    $("#tLlm").innerHTML = `<span class="tile-label">LLM usage · session</span><span class="tile-value">${esc(fmtCompact(llm.promptTokens + llm.completionTokens))}<small>tokens</small></span>
-      <div class="tile-foot"><span>${fmtInt(llm.calls)} calls</span><span class="sep">|</span><span>${llm.promptTokens ? Math.round((llm.cachedTokens / llm.promptTokens) * 100) : 0}% cached</span>${llm.errors ? `<span class="sep">|</span><span class="bad">${llm.errors} errors</span>` : ""}</div>`;
+    patch($("#tLlm"), `<span class="tile-label">LLM usage · session</span><span class="tile-value">${esc(fmtCompact(llm.promptTokens + llm.completionTokens))}<small>tokens</small></span>
+      <div class="tile-foot"><span>${fmtInt(llm.calls)} calls</span><span class="sep">|</span><span>${llm.promptTokens ? Math.round((llm.cachedTokens / llm.promptTokens) * 100) : 0}% cached</span>${llm.errors ? `<span class="sep">|</span><span class="bad">${llm.errors} errors</span>` : ""}</div>`);
 
     // credits
-    $("#rangeChips").innerHTML = [24, 48, 168].map(h => `<button class="chip-btn" data-act="range" data-h="${h}" aria-pressed="${UI.creditRange === h}">${h === 168 ? "7d" : `${h}h`}</button>`).join("");
+    patch($("#rangeChips"), [24, 48, 168].map(h => `<button class="chip-btn" data-act="range" data-h="${h}" aria-pressed="${UI.creditRange === h}">${h === 168 ? "7d" : `${h}h`}</button>`).join(""));
     const from = Date.now() - UI.creditRange * 3600_000;
     const cr = creditsNow();
     const base = creditsAt(from);
     const dlt = cr != null && base != null ? cr - base : null;
-    $("#creditHero").innerHTML = `<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:8px"><span class="hero-value">${esc(fmtInt(cr))}</span><span class="muted">credits</span>${dlt != null ? `<span class="delta ${dlt > 0 ? "up" : dlt < 0 ? "down" : "flat"}">${dlt > 0 ? "▲" : dlt < 0 ? "▼" : "•"} ${esc(fmtSigned(dlt))} over ${UI.creditRange === 168 ? "7d" : `${UI.creditRange}h`}</span>` : ""}</div>`;
+    patch($("#creditHero"), `<div style="display:flex;align-items:baseline;gap:12px;margin-bottom:8px"><span class="hero-value">${esc(fmtInt(cr))}</span><span class="muted">credits</span>${dlt != null ? `<span class="delta ${dlt > 0 ? "up" : dlt < 0 ? "down" : "flat"}">${dlt > 0 ? "▲" : dlt < 0 ? "▼" : "•"} ${esc(fmtSigned(dlt))} over ${UI.creditRange === 168 ? "7d" : `${UI.creditRange}h`}</span>` : ""}</div>`);
     creditsChart($("#creditChart"), S.credits, from);
 
     // now
@@ -478,21 +518,21 @@ VIEWS.overview = {
       const wakeEntries = S.activity.filter(e => e.wake === st.wake.id);
       const lastThought = [...wakeEntries].reverse().find(e => e.kind === "thought");
       const after = lastThought ? wakeEntries.filter(e => e.kind === "tool" && e.id > lastThought.id) : [];
-      $("#nowAside").innerHTML = `<span class="badge b-accent">round ${st.wake.round}</span>`;
-      nowBody.innerHTML = `<div class="muted" style="font-size:12px">wake #${st.wake.id} · ${esc(st.wake.reason)}</div>
+      patch($("#nowAside"), `<span class="badge b-accent">round ${st.wake.round}</span>`);
+      patch(nowBody, `<div class="muted" style="font-size:12px">wake #${st.wake.id} · ${esc(st.wake.reason)}</div>
         <p class="thought live">${esc(lastThought?.text ?? "Reading working memory…")}</p>
         <div class="calls">${after.map(e => `<div class="call-line"><span class="ev-dot" style="position:static;box-shadow:none;background:var(--${outcomeClass(e.outcome) === "ok" ? "good" : outcomeClass(e.outcome) === "rejected" ? "warn" : "bad"});width:7px;height:7px;flex:none;border-radius:50%"></span><span class="mono">${esc(e.tool)}</span><span class="args">${esc(e.summary ?? argsBrief(e.args))}</span></div>`).join("")}</div>
-        <a href="#/activity/${st.wake.id}" style="font-size:12.5px">follow the transcript →</a>`;
+        <a href="#/activity/${st.wake.id}" style="font-size:12.5px">follow the transcript →</a>`);
     } else {
       const w = S.wakes[0];
       const next = st.scheduler.pending[0];
-      $("#nowAside").innerHTML = st.scheduler.paused ? '<span class="badge b-warn">paused</span>' : '<span class="badge b-good">standing by</span>';
-      nowBody.innerHTML = `${w ? `<div class="muted" style="font-size:12px">last wake #${w.wake} · <span data-ago="${w.ts}">${esc(fmtAgo(w.ts))}</span></div><p class="thought">${esc(w.text)}</p><div class="statline">${wakeStatsTags(w)}</div>` : empty("No wakes yet.")}
-        ${next ? `<div class="call-line" style="margin-top:4px"><span class="muted">next</span><b class="mono" data-cd="${next.at}">${esc(fmtCountdown(next.at))}</b><span class="args" style="font-family:var(--font-body);font-size:12.5px">${esc(next.reason)}</span></div>` : ""}`;
+      patch($("#nowAside"), st.scheduler.paused ? '<span class="badge b-warn">paused</span>' : '<span class="badge b-good">standing by</span>');
+      patch(nowBody, `${w ? `<div class="muted" style="font-size:12px">last wake #${w.wake} · <span data-ago="${w.ts}">${esc(fmtAgo(w.ts))}</span></div><p class="thought">${esc(w.text)}</p><div class="statline">${wakeStatsTags(w)}</div>` : empty("No wakes yet.")}
+        ${next ? `<div class="call-line" style="margin-top:4px"><span class="muted">next</span><b class="mono" data-cd="${next.at}">${esc(fmtCountdown(next.at))}</b><span class="args" style="font-family:var(--font-body);font-size:12.5px">${esc(next.reason)}</span></div>` : ""}`);
     }
 
     // mini fleet
-    $("#miniFleet").innerHTML = fl.length ? `<table class="table mini-fleet"><thead><tr><th>Ship</th><th>Status</th><th>Where</th><th>Fuel</th><th>Cargo</th><th class="r">Next</th></tr></thead><tbody>${fl.map(s => {
+    patch($("#miniFleet"), fl.length ? `<table class="table mini-fleet"><thead><tr><th>Ship</th><th>Status</th><th>Where</th><th>Fuel</th><th>Cargo</th><th class="r">Next</th></tr></thead><tbody>${fl.map(s => {
       const t = s.nav?.route;
       const where = t ? `<span class="mono">${esc(wpShort(t.from))} → ${esc(wpShort(t.to))}</span>` : `<span class="mono">${esc(wpShort(s.nav?.waypoint))}</span>`;
       const cdAt = s.cooldown?.expiration ? parseTs(s.cooldown.expiration) : NaN;
@@ -502,21 +542,21 @@ VIEWS.overview = {
       return `<tr class="clickable" data-act="goto" data-href="#/fleet"><td>${esc(s.symbol)}<div class="muted" style="font-size:11px">${esc(title(s.role))}</div></td><td>${statusBadge(s.nav?.status)}</td><td>${where}</td>
         <td class="num ${fuelPct != null && fuelPct < 20 ? "warn" : ""}">${fuelPct == null ? '<span class="muted">—</span>' : `${Math.round(fuelPct)}%`}</td>
         <td class="num">${s.cargo?.capacity ? `${s.cargo.units}/${s.cargo.capacity}` : '<span class="muted">—</span>'}</td><td class="r">${nxt}</td></tr>`;
-    }).join("")}</tbody></table>` : empty("No ships cached yet.", "The fleet appears after the agent's first wake.");
+    }).join("")}</tbody></table>` : empty("No ships cached yet.", "The fleet appears after the agent's first wake."));
 
     // alerts
     const al = alerts();
-    $("#alertList").innerHTML = al.length ? al.map(a => `<div class="alert ${a.lvl}">${icon(a.lvl === "info" ? "info" : "warn")}<div>${a.href ? `<a href="${esc(a.href)}" style="color:inherit">${esc(a.text)}</a>` : esc(a.text)}${a.sub ? `<div class="alert-sub">${esc(a.sub)}</div>` : ""}</div></div>`).join("")
-      : `<div class="alert info">${icon("info")}<div>All clear<div class="alert-sub">No low fuel, deadlines or failing wakes.</div></div></div>`;
+    patch($("#alertList"), al.length ? al.map(a => `<div class="alert ${a.lvl}">${icon(a.lvl === "info" ? "info" : "warn")}<div>${a.href ? `<a href="${esc(a.href)}" style="color:inherit">${esc(a.text)}</a>` : esc(a.text)}${a.sub ? `<div class="alert-sub">${esc(a.sub)}</div>` : ""}</div></div>`).join("")
+      : `<div class="alert info">${icon("info")}<div>All clear<div class="alert-sub">No low fuel, deadlines or failing wakes.</div></div></div>`);
 
     // wakes
-    $("#wakeList").innerHTML = S.wakes.slice(0, 8).map(w => {
+    patch($("#wakeList"), S.wakes.slice(0, 8).map(w => {
       const delta = wakeDelta(w);
       const iss = issuesOf(w);
       return `<a class="wake-row" href="#/activity/${w.wake}"><div class="wake-id">#${w.wake}<small>${esc(fmtTime(w.ts))}</small></div>
         <div style="min-width:0"><div class="wake-text">${esc(w.text)}</div><div class="wake-reason">${esc(w.reason)}</div></div>
         <div class="wake-stats">${delta ? `<span class="${delta > 0 ? "good" : "bad"}">${esc(fmtSigned(delta))} cr</span>` : ""}<span>${esc(fmtDur(w.stats?.durationMs))}${w.stats ? ` · ${w.stats.requests} req` : ""}</span>${iss ? `<span class="warn">${iss} failed</span>` : ""}</div></a>`;
-    }).join("") || empty("No wakes yet.");
+    }).join("") || empty("No wakes yet."));
   },
 };
 
@@ -530,10 +570,10 @@ VIEWS.fleet = {
     const fl = ships();
     const counts = { "": fl.length };
     for (const s of fl) counts[s.nav?.status] = (counts[s.nav?.status] ?? 0) + 1;
-    $("#fleetChips").innerHTML = [["", "All"], ["IN_TRANSIT", "In transit"], ["IN_ORBIT", "In orbit"], ["DOCKED", "Docked"]]
-      .map(([k, l]) => `<button class="chip-btn" data-act="fleet-filter" data-k="${k}" aria-pressed="${UI.fleetFilter === k}">${l} <span class="muted">${counts[k] ?? 0}</span></button>`).join("");
+    patch($("#fleetChips"), [["", "All"], ["IN_TRANSIT", "In transit"], ["IN_ORBIT", "In orbit"], ["DOCKED", "Docked"]]
+      .map(([k, l]) => `<button class="chip-btn" data-act="fleet-filter" data-k="${k}" aria-pressed="${UI.fleetFilter === k}">${l} <span class="muted">${counts[k] ?? 0}</span></button>`).join(""));
     const list = fl.filter(s => !UI.fleetFilter || s.nav?.status === UI.fleetFilter);
-    $("#ships").innerHTML = list.map(s => {
+    patch($("#ships"), list.map(s => {
       const r = s.nav?.route;
       const dep = r ? parseTs(r.departed) : NaN, arr = r ? parseTs(r.arrival) : NaN;
       const pct = r ? Math.max(0, Math.min(100, ((Date.now() - dep) / (arr - dep || 1)) * 100)) : 0;
@@ -554,7 +594,7 @@ VIEWS.fleet = {
           ${last ? `<div class="ship-last"><span class="muted nowrap" data-ago="${last.ts}">${esc(fmtAgo(last.ts))}</span><span class="${outcomeClass(last.outcome) === "ok" ? "" : outcomeClass(last.outcome) === "rejected" ? "warn" : "bad"}" title="${esc(last.summary ?? "")}">${esc(last.summary ?? last.tool)}</span></div>` : '<div class="muted">no recent actions</div>'}
           ${[...(s.mounts ?? []), ...(s.modules ?? [])].length ? `<div class="kit">${[...(s.mounts ?? []), ...(s.modules ?? [])].map(m => `<span class="tag small">${esc(m.replace(/^(MOUNT|MODULE)_/, "").replace(/_/g, " ").toLowerCase())}</span>`).join("")}</div>` : ""}
         </div></article>`;
-    }).join("") || empty(fl.length ? "No ships match this filter." : "No ships cached yet.", fl.length ? "" : "The fleet appears after the agent's first wake.");
+    }).join("") || empty(fl.length ? "No ships match this filter." : "No ships cached yet.", fl.length ? "" : "The fleet appears after the agent's first wake."));
   },
 };
 
@@ -574,18 +614,18 @@ VIEWS.activity = {
     const picks = [];
     if (st?.wake && !S.wakes.some(w => w.wake === st.wake.id)) picks.push({ wake: st.wake.id, ts: st.wake.startedAt, text: st.wake.reason, live: true });
     picks.push(...S.wakes);
-    $("#followBtn").innerHTML = UI.selWake ? '<button class="btn btn-sm btn-ghost" data-act="follow">Follow latest</button>' : '<span class="muted">following latest</span>';
+    patch($("#followBtn"), UI.selWake ? '<button class="btn btn-sm btn-ghost" data-act="follow">Follow latest</button>' : '<span class="muted">following latest</span>');
     $("#issuesBtn").setAttribute("aria-pressed", String(UI.logIssues));
-    $("#wakePicks").innerHTML = picks.map(w => {
+    patch($("#wakePicks"), picks.map(w => {
       const delta = wakeDelta(w);
       const iss = w.live ? 0 : issuesOf(w);
       return `<button class="wake-pick" data-act="pick-wake" data-id="${w.wake}" aria-current="${w.wake === sel}">
         <div class="top"><span>#${w.wake}</span><span>${esc(fmtTime(w.ts))}</span>${w.live ? '<span class="live-tag">LIVE</span>' : `<span>${esc(fmtDur(w.stats?.durationMs))}</span>`}${delta ? `<span class="delta ${delta > 0 ? "up" : "down"}">${esc(fmtSigned(delta))}</span>` : ""}</div>
         <div class="txt">${esc(w.text)}</div>${iss ? `<div class="issues">${iss} failed call${iss === 1 ? "" : "s"}</div>` : ""}</button>`;
-    }).join("") || empty("No wakes yet.");
+    }).join("") || empty("No wakes yet."));
 
     const box = $("#transcript");
-    if (!sel) { box.innerHTML = empty("Nothing to show yet.", "Transcripts appear once the agent wakes."); return; }
+    if (!sel) { patch(box, empty("Nothing to show yet.", "Transcripts appear once the agent wakes.")); return; }
     const summary = S.wakes.find(w => w.wake === sel);
     const live = st?.wake?.id === sel;
     const entries = S.wakeLog.get(sel) ?? [];
@@ -598,13 +638,13 @@ VIEWS.activity = {
       return true;
     });
     const calls = entries.filter(e => e.kind === "tool");
-    box.innerHTML = `<div class="transcript-head">
+    patch(box, `<div class="transcript-head">
         <div class="transcript-title"><h2>Wake #${sel}</h2>${live ? '<span class="badge b-accent">executing</span>' : ""}<span class="muted">${esc(summary?.reason ?? st?.wake?.reason ?? "")}</span><span class="muted" style="margin-left:auto">${esc(fmtTime(summary?.stats?.startedAt ?? st?.wake?.startedAt ?? entries[0]?.ts))}</span></div>
         ${summary ? `<div class="transcript-summary">${esc(summary.text)}</div>` : ""}
         <div class="statline">${summary ? wakeStatsTags(summary) : live ? `<span class="tag small">running <b data-elapsed="${st.wake.startedAt}">${esc(fmtDur(Date.now() - st.wake.startedAt))}</b></span><span class="tag small">round ${st.wake.round}</span>` : ""}
           <span class="tag small">${calls.length} calls</span>${calls.filter(c => c.outcome !== "ok").length ? `<span class="tag small"><b class="warn">${calls.filter(c => c.outcome !== "ok").length}</b> failed</span>` : ""}</div>
       </div>
-      <div class="timeline">${shown.map(renderEntry).join("") || empty(entries.length ? "No entries match the filter." : "Loading transcript…")}</div>`;
+      <div class="timeline">${shown.map(renderEntry).join("") || empty(entries.length ? "No entries match the filter." : "Loading transcript…")}</div>`);
   },
 };
 
@@ -678,7 +718,8 @@ VIEWS.map = {
     const sel = $("#sysSelect");
     const systems = u?.systems ?? [];
     if (!UI.mapSystem) UI.mapSystem = ships()[0]?.nav?.system ?? systems[0]?.symbol ?? null;
-    sel.innerHTML = systems.map(s => `<option ${s.symbol === UI.mapSystem ? "selected" : ""}>${esc(s.symbol)}</option>`).join("") || "<option>no systems cached</option>";
+    patch(sel, systems.map(s => `<option ${s.symbol === UI.mapSystem ? "selected" : ""}>${esc(s.symbol)}</option>`).join("") || "<option>no systems cached</option>");
+    if (UI.mapSystem && sel.value !== UI.mapSystem) sel.value = UI.mapSystem;
     renderMap();
     renderMapDetail();
   },
@@ -699,7 +740,7 @@ function renderMap() {
   const { wps, bySym, parents, children } = mapModel();
   $("#mapEmpty").hidden = wps.length > 0;
   if (!wps.length) {
-    svg.innerHTML = "";
+    patch(svg, "");
     return;
   }
   const pw = svg.clientWidth || 800, ph = svg.clientHeight || 600;
@@ -776,7 +817,7 @@ function renderMap() {
     shipsSvg += hull(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, ang, s.symbol.split("-").pop(), true,
       `data-mv="${a[0]},${a[1]},${b[0]},${b[1]},${t0},${t1}"`);
   }
-  svg.innerHTML = `<g>${rings}</g><g>${lines}</g><g>${bodies}</g><g>${shipsSvg}</g>`;
+  patch(svg, `<g>${rings}</g><g>${lines}</g><g>${bodies}</g><g>${shipsSvg}</g>`);
 }
 
 function renderMapDetail() {
@@ -786,20 +827,20 @@ function renderMapDetail() {
   const w = bySym.get(UI.mapSel);
   if (!w) {
     const fl = ships();
-    box.innerHTML = `<header class="panel-head"><h2 class="panel-title">Ships</h2><div class="panel-aside">select a waypoint for detail</div></header><div class="panel-body flush">${fl.map(s =>
-      `<div class="sched" style="grid-template-columns:auto minmax(0,1fr) auto;cursor:pointer" data-act="select-wp" data-wp="${esc(s.nav?.route && !arrivedStale(s) ? s.nav.route.to : s.nav?.waypoint)}"><span class="mono">${esc(s.symbol)}</span><span class="dim mono" style="font-size:12px">${s.nav?.route && !arrivedStale(s) ? `→ ${esc(wpShort(s.nav.route.to))}` : `@ ${esc(wpShort(s.nav?.waypoint))}`}</span>${statusBadge(s.nav?.status)}</div>`).join("") || empty("No ships.")}</div>`;
+    patch(box, `<header class="panel-head"><h2 class="panel-title">Ships</h2><div class="panel-aside">select a waypoint for detail</div></header><div class="panel-body flush">${fl.map(s =>
+      `<div class="sched" style="grid-template-columns:auto minmax(0,1fr) auto;cursor:pointer" data-act="select-wp" data-wp="${esc(s.nav?.route && !arrivedStale(s) ? s.nav.route.to : s.nav?.waypoint)}"><span class="mono">${esc(s.symbol)}</span><span class="dim mono" style="font-size:12px">${s.nav?.route && !arrivedStale(s) ? `→ ${esc(wpShort(s.nav.route.to))}` : `@ ${esc(wpShort(s.nav?.waypoint))}`}</span>${statusBadge(s.nav?.status)}</div>`).join("") || empty("No ships.")}</div>`);
     return;
   }
   const here = ships().filter(s => s.nav?.waypoint === w.symbol && (s.nav.status !== "IN_TRANSIT" || arrivedStale(s)));
   const inbound = ships().filter(s => s.nav?.route?.to === w.symbol && s.nav.status === "IN_TRANSIT" && !arrivedStale(s));
   const m = S.markets.find(x => x.symbol === w.symbol);
-  box.innerHTML = `<header class="panel-head"><h2 class="panel-title">${esc(wpShort(w.symbol))}</h2><div class="panel-aside"><button class="btn btn-sm btn-ghost" data-act="select-wp" data-wp="">close</button></div></header>
+  patch(box, `<header class="panel-head"><h2 class="panel-title">${esc(wpShort(w.symbol))}</h2><div class="panel-aside"><button class="btn btn-sm btn-ghost" data-act="select-wp" data-wp="">close</button></div></header>
     <div class="panel-body detail-list">
       <div><div class="mono" style="font-size:13px">${esc(w.symbol)}</div><div class="dim" style="font-size:12.5px">${esc(title(w.type))} · (${esc(w.x)}, ${esc(w.y)})${w.orbits ? ` · orbits ${esc(wpShort(w.orbits))}` : ""}${w.isUnderConstruction ? ' · <span class="warn">under construction</span>' : ""}</div></div>
       ${w.traits?.length ? `<div class="detail-row"><div class="k">Traits</div><div class="chips">${w.traits.map(t => `<span class="tag small">${esc(title(t))}</span>`).join("")}</div></div>` : ""}
       <div class="detail-row"><div class="k">Ships here</div>${here.length || inbound.length ? `<div class="chips">${here.map(s => `<span class="tag">${esc(s.symbol)}</span>`).join("")}${inbound.map(s => `<span class="tag">${esc(s.symbol)} <b data-cd="${parseTs(s.nav.route.arrival)}">${esc(fmtCountdown(parseTs(s.nav.route.arrival)))}</b></span>`).join("")}</div>` : '<span class="muted" style="font-size:12.5px">none</span>'}</div>
       ${m ? `<div class="detail-row"><div class="k">Market · seen <span data-ago="${m.fetchedAt}">${esc(fmtAgo(m.fetchedAt))}</span></div>${m.tradeGoods ? `<table class="table"><thead><tr><th>Good</th><th class="r">Buy</th><th class="r">Sell</th></tr></thead><tbody>${m.tradeGoods.map(g => `<tr><td><span class="type-chip type-${esc(g.type)}" title="${esc(g.type)}">${esc(g.type[0])}</span> <span class="mono" style="font-size:12px">${esc(g.symbol)}</span></td><td class="r num">${esc(fmtInt(g.purchasePrice))}</td><td class="r num">${esc(fmtInt(g.sellPrice))}</td></tr>`).join("")}</tbody></table>` : `<div class="dim" style="font-size:12.5px">${esc(m.note ?? "")}</div>`}<a href="#/markets" data-act="open-market" data-wp="${esc(w.symbol)}" style="font-size:12.5px">open in markets →</a></div>` : ""}
-    </div>`;
+    </div>`);
 }
 
 function bindMapInteractions() {
@@ -866,12 +907,12 @@ VIEWS.markets = {
     $("#goodQuery").addEventListener("input", e => { UI.marketQuery = e.target.value; this.update(); });
   },
   update() {
-    $("#marketTabs").innerHTML = [["opps", "Opportunities"], ["browse", "Market browser"]]
-      .map(([k, l]) => `<button role="tab" data-act="market-tab" data-k="${k}" aria-selected="${UI.marketTab === k}">${l}</button>`).join("");
+    patch($("#marketTabs"), [["opps", "Opportunities"], ["browse", "Market browser"]]
+      .map(([k, l]) => `<button role="tab" data-act="market-tab" data-k="${k}" aria-selected="${UI.marketTab === k}">${l}</button>`).join(""));
     const body = $("#marketBody");
-    if (!S.markets.length) { body.innerHTML = `<section class="panel">${empty("No market data yet.", "It fills as the agent reads markets with a ship present.")}</section>`; return; }
-    if (UI.marketTab === "opps") body.innerHTML = renderOpps();
-    else body.innerHTML = renderBrowser();
+    if (!S.markets.length) { patch(body, `<section class="panel">${empty("No market data yet.", "It fills as the agent reads markets with a ship present.")}</section>`); return; }
+    if (UI.marketTab === "opps") patch(body, renderOpps());
+    else patch(body, renderBrowser());
   },
 };
 
@@ -950,7 +991,7 @@ VIEWS.contracts = {
       ["Offered", cs.filter(c => !c.accepted && isOpenContract(c))],
       ["Closed", cs.filter(c => !isOpenContract(c))],
     ];
-    $("#contractCols").innerHTML = cols.map(([name, list]) => `<div><div class="col-head">${name}<span class="count">${list.length}</span></div><div class="col-stack">${list.map(renderContract).join("") || `<section class="panel">${empty(name === "Offered" ? "No open offers." : name === "Active" ? "No active contracts." : "Nothing closed yet.")}</section>`}</div></div>`).join("");
+    patch($("#contractCols"), cols.map(([name, list]) => `<div><div class="col-head">${name}<span class="count">${list.length}</span></div><div class="col-stack">${list.map(renderContract).join("") || `<section class="panel">${empty(name === "Offered" ? "No open offers." : name === "Active" ? "No active contracts." : "Nothing closed yet.")}</section>`}</div></div>`).join(""));
   },
 };
 
@@ -992,16 +1033,16 @@ VIEWS.memory = {
     const m = S.memory;
     if (!m) return;
     const goals = [...m.goals].sort((a, b) => (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1) || b.createdAt - a.createdAt);
-    $("#goalList").innerHTML = goals.map(g => `<div class="goal${g.status !== "active" ? " done" : ""}"><div><div class="goal-text">${esc(g.description)}</div><div class="goal-meta">${esc(g.status)} · set <span data-ago="${g.createdAt}">${esc(fmtAgo(g.createdAt))}</span>${g.deadline ? ` · due ${esc(fmtTime(parseTs(g.deadline)))}` : ""}</div></div>${g.status === "active" ? `<button class="btn btn-sm" data-act="complete-goal" data-id="${esc(g.id)}">Done</button>` : ""}</div>`).join("") || empty("No goals yet.");
+    patch($("#goalList"), goals.map(g => `<div class="goal${g.status !== "active" ? " done" : ""}"><div><div class="goal-text">${esc(g.description)}</div><div class="goal-meta">${esc(g.status)} · set <span data-ago="${g.createdAt}">${esc(fmtAgo(g.createdAt))}</span>${g.deadline ? ` · due ${esc(fmtTime(parseTs(g.deadline)))}` : ""}</div></div>${g.status === "active" ? `<button class="btn btn-sm" data-act="complete-goal" data-id="${esc(g.id)}">Done</button>` : ""}</div>`).join("") || empty("No goals yet."));
     const kinds = ["fact", "strategy", "observation", "todo"];
-    $("#noteKinds").innerHTML = [["", "All"], ...kinds.map(k => [k, k])].map(([k, l]) => `<button class="chip-btn" data-act="note-kind" data-k="${k}" aria-pressed="${UI.noteKind === k}">${esc(l)} <span class="muted">${k ? m.notes.filter(n => n.kind === k).length : m.notes.length}</span></button>`).join("");
+    patch($("#noteKinds"), [["", "All"], ...kinds.map(k => [k, k])].map(([k, l]) => `<button class="chip-btn" data-act="note-kind" data-k="${k}" aria-pressed="${UI.noteKind === k}">${esc(l)} <span class="muted">${k ? m.notes.filter(n => n.kind === k).length : m.notes.length}</span></button>`).join(""));
     const q = UI.noteQuery.trim().toLowerCase();
     const notes = m.notes.filter(n => (!UI.noteKind || n.kind === UI.noteKind) && (!q || `${n.content} ${n.tags.join(" ")}`.toLowerCase().includes(q)))
       .sort((a, b) => b.importance - a.importance || b.createdAt - a.createdAt);
     $("#noteCount").textContent = `${notes.length} of ${m.notes.length}`;
     const kindCls = { fact: "b-blue", strategy: "b-accent", observation: "b-cyan", todo: "b-warn" };
-    $("#noteList").innerHTML = notes.map(n => `<div class="note"><div class="note-side"><span class="badge plain ${kindCls[n.kind] ?? ""}">${esc(n.kind)}</span><span class="pips" title="importance ${n.importance}/5">${[1, 2, 3, 4, 5].map(i => `<i class="${i <= n.importance ? "on" : ""}"></i>`).join("")}</span></div>
-      <div><div class="note-body">${esc(n.content)}</div><div class="note-tags">${n.tags.map(t => `<span class="tag small">#${esc(t)}</span>`).join("")}<span class="muted" style="font-size:11.5px;margin-left:4px" data-ago="${n.createdAt}">${esc(fmtAgo(n.createdAt))}</span></div></div></div>`).join("") || empty(m.notes.length ? "No notes match." : "The agent hasn't remembered anything yet.");
+    patch($("#noteList"), notes.map(n => `<div class="note"><div class="note-side"><span class="badge plain ${kindCls[n.kind] ?? ""}">${esc(n.kind)}</span><span class="pips" title="importance ${n.importance}/5">${[1, 2, 3, 4, 5].map(i => `<i class="${i <= n.importance ? "on" : ""}"></i>`).join("")}</span></div>
+      <div><div class="note-body">${esc(n.content)}</div><div class="note-tags">${n.tags.map(t => `<span class="tag small">#${esc(t)}</span>`).join("")}<span class="muted" style="font-size:11.5px;margin-left:4px" data-ago="${n.createdAt}">${esc(fmtAgo(n.createdAt))}</span></div></div></div>`).join("") || empty(m.notes.length ? "No notes match." : "The agent hasn't remembered anything yet."));
   },
 };
 
@@ -1030,15 +1071,15 @@ VIEWS.agent = {
     const st = S.state;
     if (!st) return;
     const paused = st.scheduler.paused;
-    $("#ctrlBody").innerHTML = `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    patch($("#ctrlBody"), `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         ${st.wake ? `<span class="badge b-accent">executing wake #${st.wake.id}</span>` : paused ? '<span class="badge b-warn">paused</span>' : '<span class="badge b-good">standing by</span>'}
         <span class="dim" style="font-size:12.5px">${st.lastWakeEndedAt ? `last wake ended <span data-ago="${st.lastWakeEndedAt}">${esc(fmtAgo(st.lastWakeEndedAt))}</span>` : ""}</span>
         <span style="margin-left:auto;display:flex;gap:8px"><button class="btn" data-act="wake">Wake now</button><button class="btn ${paused ? "btn-primary" : ""}" data-act="toggle-pause">${paused ? "Resume" : "Pause"}</button></span></div>
-      <p class="dim" style="font-size:12.5px;margin:12px 0 0">Pausing holds scheduled wakeups; a manual wake still runs one loop. Every registered tool — purchases and scrapping included — runs at the agent's discretion under guard and policy checks.</p>`;
-    $("#directiveNow").innerHTML = st.scheduler.directive ? `<div class="directive-now">${esc(st.scheduler.directive)}</div>` : '<span class="muted" style="font-size:13px">No directive set.</span>';
+      <p class="dim" style="font-size:12.5px;margin:12px 0 0">Pausing holds scheduled wakeups; a manual wake still runs one loop. Every registered tool — purchases and scrapping included — runs at the agent's discretion under guard and policy checks.</p>`);
+    patch($("#directiveNow"), st.scheduler.directive ? `<div class="directive-now">${esc(st.scheduler.directive)}</div>` : '<span class="muted" style="font-size:13px">No directive set.</span>');
     const pend = st.scheduler.pending;
     $("#schedCount").textContent = `${pend.length} pending`;
-    $("#schedList").innerHTML = pend.map(w => `<div class="sched"><span class="when" data-cd="${w.at}">${esc(fmtCountdown(w.at))}</span><span>${esc(w.reason)}</span><span class="tag small">${esc(w.scope)}</span></div>`).join("") || empty(paused ? "Paused — nothing scheduled." : "Nothing scheduled.");
+    patch($("#schedList"), pend.map(w => `<div class="sched"><span class="when" data-cd="${w.at}">${esc(fmtCountdown(w.at))}</span><span>${esc(w.reason)}</span><span class="tag small">${esc(w.scope)}</span></div>`).join("") || empty(paused ? "Paused — nothing scheduled." : "Nothing scheduled."));
     const c = st.config, l = st.llm;
     const kv = [
       ["Model", c.model], ["Policy", c.policy], ["Max actions / wake", c.maxActionsPerWake], ["Max rounds / wake", c.maxRoundsPerWake],
@@ -1048,7 +1089,7 @@ VIEWS.agent = {
       ["Completion tokens", fmtInt(l.completionTokens)], ["LLM errors", fmtInt(l.errors)],
       ["Game event socket", st.socket.connected ? `connected · ${st.socket.events} events` : "off"], ["Panel port", c.port],
     ];
-    $("#runtimeKv").innerHTML = kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("") + (l.lastError ? `<dt>Last LLM error</dt><dd class="bad">${esc(l.lastError)}</dd>` : "");
+    patch($("#runtimeKv"), kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("") + (l.lastError ? `<dt>Last LLM error</dt><dd class="bad">${esc(l.lastError)}</dd>` : ""));
 
     const tools = S.tools ?? [];
     const q = UI.toolQuery.trim().toLowerCase();
@@ -1056,13 +1097,13 @@ VIEWS.agent = {
     $("#toolCount").textContent = `${list.length} of ${tools.length}`;
     const kindBadge = { read: "b-blue", action: "b-accent", internal: "b-cyan" };
     const order = { action: 0, read: 1, internal: 2 };
-    $("#toolList").innerHTML = list.sort((a, b) => order[a.kind] - order[b.kind] || a.name.localeCompare(b.name)).map(t => {
+    patch($("#toolList"), list.sort((a, b) => order[a.kind] - order[b.kind] || a.name.localeCompare(b.name)).map(t => {
       const open = UI.openTools.has(t.name);
       const props = Object.entries(t.input?.properties ?? {});
       const req = new Set(t.input?.required ?? []);
       return `<div class="tool-item"><div class="tool-head" data-act="toggle-tool" data-name="${esc(t.name)}" role="button" tabindex="0" aria-expanded="${open}">${icon("chevron", "caret")}<span class="mono">${esc(t.name)}</span><span class="tool-desc">${esc(t.description)}</span><span class="badge plain ${kindBadge[t.kind] ?? ""}">${esc(t.kind)}${t.rateCost ? ` · ${t.rateCost}` : ""}</span></div>
         ${open ? `<div class="tool-body"><div>${esc(t.description)}</div>${props.length ? `<div class="params">${props.map(([k, p]) => `<span class="mono">${esc(k)}</span><span class="muted">${esc(p.type ?? (p.enum ? "enum" : p.anyOf ? "union" : "any"))}${req.has(k) ? "" : "?"}</span><span>${esc(p.description ?? (p.enum ? p.enum.slice(0, 8).join(" | ") + (p.enum.length > 8 ? " …" : "") : ""))}</span>`).join("")}</div>` : '<div class="muted">no parameters</div>'}<div class="muted" style="font-size:12px">~${esc(t.rateCost)} API request${t.rateCost === 1 ? "" : "s"} per call</div></div>` : ""}</div>`;
-    }).join("") || empty("No tools match.");
+    }).join("") || empty("No tools match."));
   },
 };
 
