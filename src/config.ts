@@ -66,6 +66,8 @@ export const config = {
     autoRefuelMaxPremium: num("AGENT_AUTO_REFUEL_MAX_PREMIUM", 0.15),
     // Read the market (and a stale shipyard) at every waypoint a ship arrives at.
     readMarketOnArrival: flag("AGENT_READ_MARKET_ON_ARRIVAL", true),
+    // Chart an UNCHARTED waypoint when a ship arrives there (reveals its traits, pays a one-time reward).
+    autoChart: flag("AGENT_AUTO_CHART", true),
     // Fulfil a contract when its last delivery lands, then negotiate the next offer with the same ship.
     autoContracts: flag("AGENT_AUTO_CONTRACTS", true),
     // Ship routines never spend the balance below this on cargo.

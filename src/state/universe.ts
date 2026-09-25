@@ -22,18 +22,27 @@ export interface ServerInfo {
   resetDate: string | null;
   nextReset: string | null;
   resetFrequency: string | null;
+  /** Panel only; never shown to the model. */
+  leaderboards: Leaderboards | null;
   fetchedAt: number;
+}
+
+export interface Leaderboards {
+  mostCredits: { agentSymbol: string; credits: number }[];
+  mostSubmittedCharts: { agentSymbol: string; chartCount: number }[];
 }
 
 const MARKER = "universe.json";
 const ARCHIVE_DIR = "archive";
-const STATUS_TTL_MS = 6 * 3600_000;
+// Re-read by working memory and the collector; 15 minutes keeps the panel's leaderboard current for ~4 requests an hour.
+const STATUS_TTL_MS = 15 * 60_000;
 
 let server: ServerInfo | null = null;
 
 interface StatusBody {
   resetDate?: string;
   serverResets?: { next?: string; frequency?: string };
+  leaderboards?: Leaderboards;
 }
 
 /** Pure: what to do with the data directory given the stored and current markers. */
@@ -59,6 +68,7 @@ async function fetchStatus(): Promise<ServerInfo> {
     resetDate: data.resetDate ?? null,
     nextReset: data.serverResets?.next ?? null,
     resetFrequency: data.serverResets?.frequency ?? null,
+    leaderboards: data.leaderboards ?? null,
     fetchedAt: Date.now(),
   };
   return server;
@@ -89,7 +99,17 @@ export async function checkUniverse(): Promise<void> {
   }
 }
 
-/** Server reset schedule, re-read at most every 6 hours. Null when the status call fails. */
+/** Last status read, without fetching (for the panel). */
+export function currentServer(): ServerInfo | null {
+  return server;
+}
+
+/** Demo fixtures only. */
+export function setServerInfo(info: ServerInfo): void {
+  server = info;
+}
+
+/** Server status (reset schedule, leaderboards), re-read at most every 15 minutes. Null when the status call fails. */
 export async function serverInfo(): Promise<ServerInfo | null> {
   if (server && Date.now() - server.fetchedAt < STATUS_TTL_MS) return server;
   try {

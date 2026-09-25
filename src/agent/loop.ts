@@ -21,6 +21,7 @@ import { earnings, type ShipEarnings } from "../state/earnings.js";
 import { routines, describeSpec } from "../state/routines.js";
 import { mapSystem } from "../state/collector.js";
 import { serverInfo } from "../state/universe.js";
+import { resale, type ResaleView } from "../state/resale.js";
 import type { WakeStats } from "../state/summaries.js";
 import { annotateTimes, isoSec, stamp } from "../utils/time.js";
 import type { Agent, Ship } from "../generated/types.js";
@@ -52,7 +53,7 @@ Strategy:
 - Parallel income: (1) Trading — buy where a good is EXPORTed cheap, sell where it is IMPORTed dear; check tradeVolume per transaction and that margin × units clearly beats fuel. (2) Mining — mining drones / ore hounds extract at asteroid fields and sell (or hand off via transfer_cargo to a hauler). (3) Probes — cheap ships parked at markets and shipyards keep prices visible without spending fuel.
 - Invest continuously. When economy.investable covers a ship's price, buy one. Default order when unsure: 1–2 probes early to map markets and shipyards; then light haulers for trading once you know a profitable route, or mining drones if an asteroid field with nearby buyers exists. Keep buying while payback looks good. purchase_ship needs one of your ships at the shipyard (that is also how prices get revealed; prices you've seen are in economy.knownShipOffers). Assign every new ship a job in the same wake.
 - Keep the reserve (economy.reserve) for fuel, cargo capital and contract purchases; purchase_ship refuses buys that would dip below it.
-- Working memory does the bookkeeping for you: economy.trend is your measured income (earned = credit change + ship spend), economy.perShip is what each ship has earned (trade, fuel and contract money its own actions moved) against what it cost, market.tradeLeads are the best buy-here/sell-there spreads from prices your ships have seen (refreshed at every waypoint where a ship sits), with buySupply/sellSupply (a SCARCE source or ABUNDANT sink erodes the margin fast) and othersTradedLastHour (units other agents moved on the same route; a busy route saturates sooner), map lists known markets (with what each exports/imports), shipyards and asteroids with coordinates and any modifiers (STRIPPED, CRITICAL_LIMIT or UNSTABLE mark an over-mined asteroid: expect worse yields and consider moving miners), gates lists your system's jump gate and the systems it connects to. The harness fills these in between wakes. Use them before spending calls on discovery; send a ship or probe to market.unpricedMarkets to widen coverage.
+- Working memory does the bookkeeping for you: economy.trend is your measured income (earned = credit change + ship spend), economy.perShip is what each ship has earned (trade, fuel and contract money its own actions moved) against what it cost and what it would fetch if scrapped (resale; estimated = quoted for another ship with the same frame), market.tradeLeads are the best buy-here/sell-there spreads from prices your ships have seen (refreshed at every waypoint where a ship sits), with buySupply/sellSupply (a SCARCE source or ABUNDANT sink erodes the margin fast), othersTradedLastHour (units other agents moved on the same route; a busy route saturates sooner) and youPayChange1hPct/youGetChange1hPct (price moves over the last hour: a rising youPay or falling youGet means the spread is closing), map lists known markets (with what each exports/imports), shipyards and asteroids with coordinates and any modifiers (STRIPPED, CRITICAL_LIMIT or UNSTABLE mark an over-mined asteroid: expect worse yields; mine routines move to a clear asteroid with the same deposits on their own), UNCHARTED waypoints hide their traits (possibly a market or shipyard) until a ship visits: the harness charts them on arrival for a one-time reward, and scout routines visit them, gates lists your system's jump gate and the systems it connects to; while the gate is under construction, finishCost is the least it would cost to buy the missing materials at known prices (supply_construction delivers them; supplying pays nothing itself but a finished gate opens the neighbouring systems). The harness fills these in between wakes. Use them before spending calls on discovery; send a ship or probe to market.unpricedMarkets to widen coverage.
 - Ships wear: a ship's wear field lists worn components (condition is repairable with repair_ship at a shipyard; integrity is permanent). server.nextReset is when the game wipes everything.
 - Track what works: remember() profitable routes (good, buy at, sell at, margin) and ship payback; set_goal for fleet-size and credit targets and complete them as you pass them.
 
@@ -81,7 +82,7 @@ interface WorkingMemory {
     investable: number | null;
     fleetSize: number;
     idleShips: string[];
-    perShip: ShipEarnings[];
+    perShip: (ShipEarnings & { resale: ResaleView | null })[];
     knownShipOffers: { type: string; price: number; waypoint: string; supply: string; cargo?: number | undefined; speed?: number | undefined; seenMinutesAgo: number }[];
     trend: { lastHour: Trend | null; lastDay: Trend | null };
   };
@@ -120,6 +121,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   if (ships) {
     earnings.track(ships.map(s => s.symbol));
     routines.prune(ships.map(s => s.symbol));
+    resale.prune(ships.map(s => s.symbol));
   }
   if (!agent) alerts.push("agent data unavailable (API refresh failed) — retry get_my_agent before spending credits");
   if (!ships) alerts.push("fleet data unavailable (API refresh failed) — verify with list_ships before acting");
@@ -172,6 +174,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   const tradeLeads = computeTradeLeads(latestPrices, {
     distance: (a, b) => atlas.distance(a, b),
     competition: routeCompetition(isOurs),
+    change: (wp, good, side) => prices.change(wp, good, side),
   });
   const fleetSystems = [...new Set((ships ?? []).map(s => s.nav.systemSymbol))];
   const priced = prices.marketsSeen();
@@ -235,7 +238,9 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
       investable,
       fleetSize: ships?.length ?? 0,
       idleShips,
-      perShip: ships ? earnings.summary(ships.map(s => s.symbol)) : [],
+      perShip: ships
+        ? earnings.summary(ships.map(s => s.symbol)).map(r => ({ ...r, resale: resale.lookup(r.ship, ships.find(s => s.symbol === r.ship)?.frame?.symbol) }))
+        : [],
       knownShipOffers: offers,
       trend,
     },
@@ -246,7 +251,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
       unpricedMarkets,
     },
     map: atlas.summary(fleetSystems),
-    gates: atlas.gates(fleetSystems),
+    gates: atlas.gates(fleetSystems, bestBuy),
     surveys: surveys.active().map(compactSurvey),
     fleet: {
       asOf: ships ? now : "unavailable",

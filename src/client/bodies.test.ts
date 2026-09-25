@@ -33,6 +33,7 @@ const survey = { signature: "X1-A-B1-1", symbol: "X1-A-B1", deposits: [{ symbol:
 // One call per client method that sends a body.
 const calls: Record<string, () => Promise<unknown>> = {
   navigateShip: () => api.navigate("S-1", "X1-A-B1"),
+  supplyConstruction: () => api.supplyConstruction("X1-A", "X1-A-I1", "S-1", "FAB_MATS", 5),
   patchShipNav: () => api.patchNav("S-1", "DRIFT"),
   warpShip: () => api.warp("S-1", "X1-A-B1"),
   jumpShip: () => api.jump("S-1", "X1-A-B1"),

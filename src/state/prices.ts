@@ -39,6 +39,10 @@ export interface TradeLead {
   sellSupply?: string | undefined;
   /** Units other agents bought at buyAt plus sold at sellAt in the last hour (only counted where a ship saw the market). */
   othersTradedLastHour?: number | undefined;
+  /** % change of youPay at buyAt over about the last hour (rising = the source is drying up). */
+  youPayChange1hPct?: number | undefined;
+  /** % change of youGet at sellAt over about the last hour (falling = the sink is filling up). */
+  youGetChange1hPct?: number | undefined;
 }
 
 type History = Record<string, PricePoint[]>;
@@ -94,6 +98,14 @@ class PriceHistory {
       }
       this.trades.set(key, arr.filter(x => now - x.ts <= TRADE_LOG_MS));
     }
+  }
+
+  /**
+   * % change of one price series between the earliest reading in the last
+   * hour (at least 10 minutes older than the latest) and the latest reading.
+   */
+  change(waypoint: string, good: string, side: "youPay" | "youGet", now = Date.now()): number | null {
+    return priceChange(this.history[`${waypoint}:${good}`] ?? [], side, now);
   }
 
   /** Units of `good` other agents moved at `waypoint` (type PURCHASE or SELL) since `since`, or null when no trades were ever seen there. */
@@ -166,6 +178,8 @@ export function computeTradeLeads(
     distance?: (a: string, b: string) => number | null;
     /** Units other agents moved on this route recently (see PriceHistory.othersTraded), null when unknown. */
     competition?: (good: string, buyAt: string, sellAt: string) => number | null;
+    /** % change of a price series over about the last hour (see PriceHistory.change), null when too little history. */
+    change?: (waypoint: string, good: string, side: "youPay" | "youGet") => number | null;
   } = {},
 ): TradeLead[] {
   const now = opts.now ?? Date.now();
@@ -203,11 +217,30 @@ export function computeTradeLeads(
   for (const lead of top) {
     const others = opts.competition?.(lead.good, lead.buyAt, lead.sellAt);
     if (others != null) lead.othersTradedLastHour = others;
+    const pay = opts.change?.(lead.buyAt, lead.good, "youPay");
+    if (pay != null) lead.youPayChange1hPct = pay;
+    const get = opts.change?.(lead.sellAt, lead.good, "youGet");
+    if (get != null) lead.youGetChange1hPct = get;
   }
   return top;
 }
 
 export const prices = new PriceHistory();
+
+const TREND_WINDOW_MS = 3600_000;
+const TREND_MIN_SPAN_MS = 10 * 60_000;
+
+/** Pure: see PriceHistory.change. Points are oldest first. */
+export function priceChange(points: PricePoint[], side: "youPay" | "youGet", now: number): number | null {
+  const field = side === "youPay" ? "purchasePrice" : "sellPrice";
+  const latest = points[points.length - 1];
+  const last = latest?.[field];
+  if (!latest || last == null) return null;
+  const ref = points.find(p => p.ts >= now - TREND_WINDOW_MS && p.ts <= latest.ts - TREND_MIN_SPAN_MS && p[field] != null);
+  const first = ref?.[field];
+  if (!first) return null;
+  return Math.round(((last - first) / first) * 100);
+}
 
 /** Competition lookup for computeTradeLeads: others' buys at the source plus others' sells at the sink over the last hour. */
 export function routeCompetition(isOurs: (ship: string) => boolean, now = Date.now()) {

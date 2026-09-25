@@ -12,6 +12,7 @@ import { prices } from "../state/prices.js";
 import { atlas } from "../state/atlas.js";
 import { galaxy, toRow } from "../state/galaxy.js";
 import { creditHistory } from "../state/credits.js";
+import { currentServer } from "../state/universe.js";
 import { toolCatalogJson } from "../tools/registry.js";
 import { compactMarket, compactShip, compactWaypoint, contractSummary } from "../state/projections.js";
 import { config } from "../config.js";
@@ -102,6 +103,10 @@ export function startPanel(): void {
       wake: runtime.wake,
       lastWakeEndedAt: runtime.lastWakeEndedAt,
       llm: runtime.llm,
+      server: (() => {
+        const sv = currentServer();
+        return sv ? { nextReset: sv.nextReset, resetFrequency: sv.resetFrequency, leaderboards: sv.leaderboards, fetchedAt: sv.fetchedAt } : null;
+      })(),
       requestsTotal: runtime.requestsTotal,
       startedAt: runtime.startedAt,
       now: Date.now(),

@@ -1,9 +1,10 @@
 import { transport } from "../transport/http.js";
-import { mirror, observeAgent, storeKeys, type FleetState } from "./store.js";
+import { mergeSystemWaypoints, mirror, observeAgent, storeKeys, type FleetState } from "./store.js";
 import { prices } from "./prices.js";
 import { atlas } from "./atlas.js";
 import { shipyards } from "./shipyards.js";
-import type { Agent, Contract, Market, Ship, Shipyard, Waypoint } from "../generated/types.js";
+import { earnings } from "./earnings.js";
+import type { Agent, Contract, Market, Ship, Shipyard, Waypoint, createChartResponse } from "../generated/types.js";
 
 interface PagedResult<T> {
   data: T[];
@@ -81,6 +82,21 @@ export async function fetchWaypoint(systemSymbol: string, waypointSymbol: string
   mirror.set(storeKeys.waypoint(systemSymbol, waypointSymbol), data);
   atlas.record([data]);
   return data;
+}
+
+/**
+ * Charts the waypoint a ship is at: reveals its traits (markets, shipyards,
+ * deposits hide behind UNCHARTED until someone charts them) and pays a
+ * one-time reward that depends on how rare they are.
+ */
+export async function chartWaypoint(shipSymbol: string): Promise<{ waypoint: Waypoint; reward: number }> {
+  const { data } = await transport.request<createChartResponse>("createChart", { path: { shipSymbol } });
+  observeAgent(data.agent);
+  atlas.record([data.waypoint]);
+  mergeSystemWaypoints(data.waypoint.systemSymbol, [data.waypoint]);
+  const reward = data.transaction?.totalPrice ?? 0;
+  if (reward) earnings.record(shipSymbol, reward, "other");
+  return { waypoint: data.waypoint, reward };
 }
 
 export async function fetchShipyard(systemSymbol: string, waypointSymbol: string): Promise<Shipyard> {
