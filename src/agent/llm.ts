@@ -23,6 +23,7 @@ export interface ParsedToolCall {
 export interface ChatResult {
   content: string | null;
   toolCalls: ParsedToolCall[];
+  usage: { prompt: number; completion: number; cached: number };
 }
 
 export type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
@@ -62,7 +63,16 @@ export async function chat(
     }
     toolCalls.push({ id: tc.id ?? null, name: tc.function.name, args });
   }
-  return { content: msg?.content ?? null, toolCalls };
+  const u = completion.usage;
+  return {
+    content: msg?.content ?? null,
+    toolCalls,
+    usage: {
+      prompt: u?.prompt_tokens ?? 0,
+      completion: u?.completion_tokens ?? 0,
+      cached: u?.prompt_tokens_details?.cached_tokens ?? 0,
+    },
+  };
 }
 
 // Lenient fallback for models/endpoints that answer in text instead of tool_calls.

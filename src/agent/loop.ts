@@ -13,9 +13,11 @@ import { getTool, toolSpecs } from "../tools/registry.js";
 import { executeTool, type ExecOutcome } from "../tools/executor.js";
 import { scheduler, type Wakeup } from "./scheduler.js";
 import { chat, extractJson, type ChatMessage } from "./llm.js";
-import { compactShip, contractSummary } from "../state/projections.js";
+import { compactShip, contractSummary, isContractOpen } from "../state/projections.js";
 import { shipyards } from "../state/shipyards.js";
-import type { Agent, Contract, Ship } from "../generated/types.js";
+import { creditHistory } from "../state/credits.js";
+import type { WakeStats } from "../state/summaries.js";
+import type { Agent, Ship } from "../generated/types.js";
 
 const SYSTEM_PROMPT = `You are the decision core of a SpaceTraders agent. You control a fleet of ships via tools. You are fully autonomous — no human will approve or intervene.
 
@@ -25,7 +27,9 @@ How you work:
 - Reason freely in your reply text. Act by calling tools — batch as many as you like per turn; the harness executes them with bounded concurrency and rate-limits the API for you. Results come back each round and you think again.
 - This conversation is your working memory for the whole wake: every tool call and result stays in context. Before re-fetching data, check what you already have — identical repeat reads are answered from cache without hitting the API.
 - You decide when the wake ends: call end_loop when there is nothing more worth doing — optionally with wakeAt (ISO) to choose the next wake time. Ship arrivals and cooldowns are auto-scheduled from tool results regardless.
-- Guards fail locally at zero cost — read the reason and adapt (fetch market/waypoint data, refuel, move a ship to the shipyard).
+- Guards fail locally before any action request is sent — read the reason and adapt (fetch market/waypoint data, refuel, move a ship to the shipyard).
+- Identical reads within a wake are answered from cache until you take an action; after any action, reads hit the API again.
+- When you finish, call end_loop with a short summary for the human operator.
 
 Strategy:
 - Every ship works, every wake. Working memory tags each ship's state; any ship marked IDLE needs a job this wake (a probe you deliberately parked at a market or shipyard counts as working). Plan all ships together and batch their calls in the same turn — ships run in parallel, and an idle ship is lost income. Don't end the wake while a ship is idle and you can still act.
@@ -35,6 +39,12 @@ Strategy:
 - Keep the reserve (economy.reserve) for fuel, cargo capital and contract purchases; purchase_ship refuses buys that would dip below it.
 - Working memory does the bookkeeping for you: economy.trend is your measured income (earned = credit change + ship spend), market.tradeLeads are the best buy-here/sell-there spreads from prices your ships have seen (refreshed at every waypoint where a ship sits), map lists known markets/shipyards/asteroids with coordinates. Use them before spending calls on discovery; send a ship or probe to market.unpricedMarkets to widen coverage.
 - Track what works: remember() profitable routes (good, buy at, sell at, margin) and ship payback; set_goal for fleet-size and credit targets and complete them as you pass them.
+
+Game mechanics:
+- Warp, jump and scan need the ship IN_ORBIT; repair and modify need it DOCKED (trade, refuel, deliver, negotiate, navigate, extract, siphon and survey switch automatically).
+- Market and shipyard prices are only visible while one of your ships is at that waypoint; get_market_memory has prices seen earlier.
+- Fuel: CRUISE ≈ distance, BURN ≈ 2× distance (faster), DRIFT = 1 fuel (very slow) — DRIFT rescues a ship too low on fuel to reach a market.
+- Working memory lists your limits for this wake; mutating actions count against maxActions.
 
 Rules:
 - Contracts: deliver goods then fulfill when complete. Watch deadlines.
@@ -69,6 +79,7 @@ interface WorkingMemory {
   notes: unknown[];
   recentSummaries: unknown[];
   rateBudget: { remaining: number | null; limit: number | null };
+  limits: { maxActions: number; maxRounds: number };
   alerts: string[];
 }
 
@@ -139,19 +150,16 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
       alerts.push(`${s.symbol} fuel low (${s.fuel.current}/${s.fuel.capacity})`);
     }
   }
-  const isOpen = (c: Contract) => !c.fulfilled && !(c.accepted && Date.parse(c.terms.deadline) < Date.now())
-    && !(!c.accepted && c.deadlineToAccept && Date.parse(c.deadlineToAccept) < Date.now());
-  const openContracts = (contracts ?? []).filter(isOpen);
+  const openContracts = (contracts ?? []).filter(isContractOpen);
   if (contracts && !openContracts.length) {
     alerts.push("no open contract — negotiate one (negotiate_contract with a ship at a faction waypoint)");
   }
   for (const c of openContracts) {
-    if (c.accepted && !c.fulfilled) {
-      const terms = (c.terms as Contract["terms"]);
-      const remaining = (terms.deliver ?? []).filter(d => d.unitsFulfilled < d.unitsRequired).length;
-      alerts.push(`contract ${c.id.slice(0, 8)} accepted, ${remaining} deliverable(s) unfinished`);
-    }
-    if (!c.accepted && c.deadlineToAccept && Date.parse(c.deadlineToAccept) < Date.now() + 24 * 3600_000) {
+    if (c.accepted) {
+      const remaining = (c.terms.deliver ?? []).filter(d => d.unitsFulfilled < d.unitsRequired).length;
+      const dueSoon = Date.parse(c.terms.deadline) < Date.now() + 24 * 3600_000 ? `, due ${c.terms.deadline}` : "";
+      alerts.push(`contract ${c.id.slice(0, 8)} accepted, ${remaining} deliverable(s) unfinished${dueSoon}`);
+    } else if (c.deadlineToAccept && Date.parse(c.deadlineToAccept) < Date.now() + 24 * 3600_000) {
       alerts.push(`contract ${c.id.slice(0, 8)} offer expires soon`);
     }
   }
@@ -194,6 +202,10 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     notes: memory.recall(undefined, undefined, 8).map(n => ({ id: n.id, kind: n.kind, content: n.content, tags: n.tags })),
     recentSummaries: summaries.recent(3).map(s => ({ wake: s.wake, text: s.text })),
     rateBudget: { remaining: runtime.rate.remaining, limit: runtime.rate.limit },
+    limits: {
+      maxActions: Math.max(config.agent.maxActionsPerWake, config.agent.actionsPerShip * (ships?.length ?? 0)),
+      maxRounds: config.agent.maxRoundsPerWake,
+    },
     alerts,
   };
   return wm;
@@ -209,6 +221,7 @@ interface PlanResponse {
   thought: string;
   calls: PlannedCall[];
   message: ChatMessage;
+  usage: { prompt: number; completion: number; cached: number };
 }
 
 async function think(messages: ChatMessage[]): Promise<PlanResponse> {
@@ -253,10 +266,12 @@ async function think(messages: ChatMessage[]): Promise<PlanResponse> {
         }
       : {}),
   };
-  return { thought, calls, message };
+  return { thought, calls, message, usage: result.usage };
 }
 
-const MAX_TOOL_RESULT_CHARS = 3_000;
+// Tool results are compact projections (see state/projections.ts); the cap is
+// a backstop for unusually large payloads, not the normal path.
+const MAX_TOOL_RESULT_CHARS = 8_000;
 const MAX_CONTEXT_CHARS = 150_000;
 const ELIDED = "[elided for context budget]";
 
@@ -275,16 +290,20 @@ function toolMessageFor(callId: string, o: ExecOutcome): ChatMessage {
     ? { summary: o.summary, result: o.result ?? null }
     : { outcome: o.outcome, summary: o.summary };
   let content = JSON.stringify(payload);
-  if (content.length > MAX_TOOL_RESULT_CHARS) content = content.slice(0, MAX_TOOL_RESULT_CHARS) + "…[truncated]";
+  if (content.length > MAX_TOOL_RESULT_CHARS) {
+    content = `${content.slice(0, MAX_TOOL_RESULT_CHARS)}…[truncated ${content.length - MAX_TOOL_RESULT_CHARS} chars — request narrower data]`;
+  }
   return { role: "tool", tool_call_id: callId, content };
 }
 
 function elideOldToolResults(messages: ChatMessage[]): void {
-  const size = () => messages.reduce((n, m) => n + JSON.stringify(m).length, 0);
+  let size = messages.reduce((n, m) => n + JSON.stringify(m).length, 0);
   for (const m of messages) {
-    if (size() <= MAX_CONTEXT_CHARS) return;
+    if (size <= MAX_CONTEXT_CHARS) return;
     if (m.role !== "tool" || m.content === ELIDED) continue;
+    size -= JSON.stringify(m).length;
     m.content = ELIDED;
+    size += JSON.stringify(m).length;
   }
 }
 
@@ -294,6 +313,7 @@ function recordCachedOutcome(outcome: ExecOutcome, args: unknown): void {
     tool: outcome.tool,
     args,
     outcome: outcome.outcome,
+    summary: outcome.summary,
     result: outcome.result,
     guards: [],
     requestsSpent: 0,
@@ -319,33 +339,44 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
     return;
   }
   running = true;
+  const startedAt = Date.now();
+  const requestsAtStart = runtime.requestsTotal;
+  const tokens = { prompt: 0, completion: 0, cached: 0 };
+  let creditsStart: number | null = null;
+  let endedBy: WakeStats["endedBy"] = "round-cap";
+  let agentSummary: string | null = null;
+  let round = 0;
+  const outcomes: ExecOutcome[] = [];
   let wakeId = 0;
   try {
     wakeId = summaries.nextWakeId();
+    runtime.wake = { id: wakeId, reason: wakeup.reason, startedAt, round: 0 };
     bus.emit({ type: "AgentWoke", ts: Date.now(), reason: wakeup.reason, scope: wakeup.scope });
     activity.append({ kind: "wake", text: `wake #${wakeId}: ${wakeup.reason} (scope ${wakeup.scope})` });
 
-    const outcomes: ExecOutcome[] = [];
     const messages: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT }];
+    // Identical reads within a wake are served from here — but only until the
+    // agent mutates game state; any executed action clears it so later reads
+    // (ship, market, contracts) reflect the action.
     const readCache = new Map<string, unknown>();
     let plan: AgentPlan | null = null;
     // Sized once the fleet is known (round 0) so each ship can get a full job.
     let actionsLeft = config.agent.maxActionsPerWake;
-    let consecutiveFailures = 0;
     let noCallRounds = 0;
-    const wakeStart = Date.now();
-    let wakeBudgetMs = config.agent.wakeTimeoutMs;
-
     const runCall = async (call: PlannedCall): Promise<ExecOutcome> => {
       const def = getTool(call.tool);
-      if (def?.kind !== "read") return executeTool(call.tool, call.args ?? {});
+      if (def?.kind !== "read") {
+        const outcome = await executeTool(call.tool, call.args ?? {});
+        if (def?.kind === "action" && (outcome.outcome === "ok" || outcome.outcome === "api-error")) readCache.clear();
+        return outcome;
+      }
       const norm = def.input.safeParse(call.args ?? {});
       const key = norm.success ? `${call.tool}|${stableKey(norm.data)}` : null;
       if (key && readCache.has(key)) {
         const outcome: ExecOutcome = {
           tool: call.tool,
           outcome: "ok",
-          summary: "cached: identical read already executed this wake — result re-sent, no API call",
+          summary: "cached: identical read already executed this wake (no action since) — result re-sent, no API call",
           result: readCache.get(key),
         };
         recordCachedOutcome(outcome, call.args ?? {});
@@ -356,28 +387,27 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       return outcome;
     };
 
-    let round = 0;
-    while (round < config.agent.maxRoundsPerWake && actionsLeft > 0) {
-      if (Date.now() - wakeStart > wakeBudgetMs) {
-        activity.append({ kind: "system", text: `wake wall-clock budget (${wakeBudgetMs}ms) exhausted` });
+    while (round < config.agent.maxRoundsPerWake) {
+      if (actionsLeft <= 0) {
+        endedBy = "action-cap";
         break;
       }
+      runtime.wake.round = round + 1;
       // Working memory seeds the conversation once per wake; afterwards the
       // conversation itself carries everything asked and learned, and live
       // state arrives via tool results.
       if (round === 0) {
-        let wmString: string;
+        let wm: WorkingMemory;
         try {
-          const wm = await buildWorkingMemory(wakeup.reason);
-          actionsLeft = Math.max(config.agent.maxActionsPerWake, config.agent.actionsPerShip * wm.economy.fleetSize);
-          // Rate-limited API calls for a larger fleet take longer; scale the wall clock with the budget.
-          wakeBudgetMs = Math.max(config.agent.wakeTimeoutMs, (config.agent.wakeTimeoutMs / config.agent.maxActionsPerWake) * actionsLeft);
-          wmString = JSON.stringify(wm, null, 1);
+          wm = await buildWorkingMemory(wakeup.reason);
+          actionsLeft = wm.limits.maxActions;
         } catch (err) {
           activity.append({ kind: "system", text: `working memory refresh failed: ${err instanceof Error ? err.message : err}` });
+          endedBy = "error";
           break;
         }
-        messages.push({ role: "user", content: `WORKING MEMORY:\n${wmString}\n\nWhat's next?` });
+        creditsStart = wm.agent?.credits ?? null;
+        messages.push({ role: "user", content: `WORKING MEMORY:\n${JSON.stringify(wm, null, 1)}\n\nWhat's next?` });
       } else {
         elideOldToolResults(messages);
       }
@@ -385,15 +415,31 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       try {
         response = await think(messages);
       } catch (err) {
-        activity.append({ kind: "system", text: `LLM error: ${err instanceof Error ? err.message : err}` });
+        const msg = err instanceof Error ? err.message : String(err);
+        runtime.llm.errors++;
+        runtime.llm.lastError = msg;
+        activity.append({ kind: "system", text: `LLM error: ${msg}` });
+        endedBy = "llm-error";
         break;
       }
+      runtime.llm.calls++;
+      runtime.llm.promptTokens += response.usage.prompt;
+      runtime.llm.completionTokens += response.usage.completion;
+      runtime.llm.cachedTokens += response.usage.cached;
+      tokens.prompt += response.usage.prompt;
+      tokens.completion += response.usage.completion;
+      tokens.cached += response.usage.cached;
+
       messages.push(response.message);
+      if (response.thought.trim()) activity.append({ kind: "thought", text: response.thought.trim() });
       plan = { thought: response.thought, calls: response.calls.map(c => ({ tool: c.tool, args: c.args })) };
       bus.emit({ type: "PlanUpdated", ts: Date.now(), thought: response.thought, calls: plan.calls });
       if (!response.calls.length) {
         // Pure reasoning turn — allow one, stop after two in a row.
-        if (++noCallRounds >= 2) break;
+        if (++noCallRounds >= 2) {
+          endedBy = "no-tool-calls";
+          break;
+        }
         messages.push({
           role: "user",
           content: `No tool calls received. ${response.thought ? `You said: "${response.thought.slice(0, 300)}"` : ""}\nCall tools to act, or end_loop to finish.`,
@@ -404,13 +450,14 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       noCallRounds = 0;
 
       // Bounded-concurrency execution of the round's calls. Per-ship locks and
-      // the transport's rate limiter serialize what must be serialized.
+      // the transport's rate limiter serialize what must be serialized. The
+      // whole batch runs even when it contains end_loop — the agent asked for
+      // every call, and each one gets a tool result.
       const slots: (ExecOutcome | null)[] = new Array(response.calls.length).fill(null);
       let next = 0;
       let ended = false;
       const worker = async (): Promise<void> => {
         for (;;) {
-          if (ended) return;
           const idx = next++;
           if (idx >= response.calls.length) return;
           const call = response.calls[idx]!;
@@ -426,7 +473,8 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
           }
           if (outcome.outcome === "ok" && outcome.tool === "end_loop") {
             ended = true;
-            return;
+            const s = (call.args as { summary?: unknown } | undefined)?.summary;
+            if (typeof s === "string" && s.trim()) agentSummary = s.trim();
           }
         }
       };
@@ -437,9 +485,6 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       await Promise.all(workers);
       const roundOutcomes = slots.filter((o): o is ExecOutcome => o !== null);
       outcomes.push(...roundOutcomes);
-      // Every executed call gets a tool message so the model sees the result.
-      // Calls after end_loop never started; their ids go unanswered, but the
-      // conversation is over so no further completion references them.
       for (let i = 0; i < slots.length; i++) {
         const o = slots[i];
         if (o) messages.push(toolMessageFor(response.calls[i]!.id, o));
@@ -452,19 +497,32 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       ).length;
       actionsLeft -= spent;
 
-      const allFailed = roundOutcomes.length > 0 && roundOutcomes.every(o => o.outcome !== "ok");
-      consecutiveFailures = allFailed ? consecutiveFailures + 1 : 0;
-
       round++;
-      if (ended) break;
-      if (consecutiveFailures >= 2) {
-        activity.append({ kind: "system", text: "loop stopped: two consecutive rounds with zero successes" });
+      if (ended) {
+        endedBy = "end_loop";
         break;
       }
     }
 
-    const text = summarizeWake(outcomes);
-    summaries.add(wakeup.reason, text, outcomes.map(o => ({ tool: o.tool, outcome: o.outcome })));
+    const details = summarizeWake(outcomes);
+    const text = agentSummary ?? (outcomes.length ? details : endedEarlyText(endedBy));
+    const stats: WakeStats = {
+      startedAt,
+      durationMs: Date.now() - startedAt,
+      rounds: round,
+      requests: runtime.requestsTotal - requestsAtStart,
+      tokens,
+      creditsStart,
+      creditsEnd: creditHistory.latest()?.credits ?? creditsStart,
+      endedBy,
+    };
+    summaries.add({
+      reason: wakeup.reason,
+      text,
+      details: agentSummary ? details : undefined,
+      actions: outcomes.map(o => ({ tool: o.tool, outcome: o.outcome })),
+      stats,
+    });
     bus.emit({ type: "LoopSummary", ts: Date.now(), wake: wakeId, text });
     activity.append({ kind: "summary", text });
     checkpointStore.save({ wakeId, reason: wakeup.reason, plan, resultsSummary: text });
@@ -479,9 +537,22 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
     }
   } finally {
     running = false;
+    runtime.wake = null;
+    runtime.lastWakeEndedAt = Date.now();
     if (!scheduler.paused && scheduler.pending().length === 0) {
       scheduler.schedule(Date.now() + config.agent.fallbackWakeMs, "fallback periodic wake");
     }
+  }
+}
+
+// A wake that did nothing must say why — a silent fleet is what makes an
+// autonomous agent untrustworthy (ARCHITECTURE §6.3).
+function endedEarlyText(endedBy: WakeStats["endedBy"]): string {
+  switch (endedBy) {
+    case "llm-error": return `no actions — LLM call failed: ${runtime.llm.lastError ?? "unknown error"}`;
+    case "error": return "no actions — working memory refresh failed (see activity log)";
+    case "no-tool-calls": return "no actions — the agent replied twice without calling a tool";
+    default: return "no actions taken";
   }
 }
 

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { api } from "../client/index.js";
-import { mirror, storeKeys, upsertShip } from "../state/store.js";
+import { observeAgent, removeShip, upsertContract, upsertShip } from "../state/store.js";
+import { compactCargo } from "../state/projections.js";
 import { registerTool } from "./registry.js";
 import {
   cargoHasGood, cooldownClear, inOrbit, isDocked, knownShip,
@@ -14,10 +15,10 @@ import type { Survey } from "../generated/types.js";
 
 registerTool({
   name: "warp",
-  description: "Warp ship to a waypoint in ANOTHER system (needs WARP_DRIVE module + fuel). Harness wakes on arrival.",
+  description: "Warp ship to a waypoint in ANOTHER system (ship in orbit, needs WARP_DRIVE module + fuel). Harness wakes on arrival.",
   kind: "action",
   input: z.object({ shipSymbol: z.string(), waypointSymbol: z.string() }),
-  guards: [knownShip, notInTransit, shipHasModule("MODULE_WARP_DRIVE")],
+  guards: [knownShip, notInTransit, inOrbit, shipHasModule("MODULE_WARP_DRIVE")],
   rateCost: 2,
   handler: async ({ shipSymbol, waypointSymbol }, ctx) => {
     const { data } = await api.warp(shipSymbol, waypointSymbol);
@@ -34,13 +35,14 @@ registerTool({
 
 registerTool({
   name: "jump",
-  description: "Jump ship through a jump gate to a connected system (needs JUMP_DRIVE module + 1 ANTIMATTER in cargo).",
+  description: "Jump ship from the jump gate it is orbiting to a connected jump-gate waypoint in another system (see get_jump_gate for connections). Ship must be in orbit at the gate; one ANTIMATTER is bought from the gate's market per jump. Sets a cooldown.",
   kind: "action",
   input: z.object({ shipSymbol: z.string(), waypointSymbol: z.string() }),
-  guards: [knownShip, notInTransit, cooldownClear, shipHasModule("MODULE_JUMP_DRIVE")],
+  guards: [knownShip, notInTransit, inOrbit, cooldownClear],
   rateCost: 2,
   handler: async ({ shipSymbol, waypointSymbol }, ctx) => {
     const { data } = await api.jump(shipSymbol, waypointSymbol);
+    observeAgent(data.agent);
     const ship = await ctx.fresh.ship(shipSymbol);
     if (ship) upsertShip({ ...ship, nav: data.nav, cooldown: data.cooldown });
     return {
@@ -125,16 +127,16 @@ registerTool({
     const { data } = await api.transferCargo(shipSymbol, tradeSymbol, units, receiveShipSymbol);
     const ship = await ctx.fresh.ship(shipSymbol);
     if (ship) upsertShip({ ...ship, cargo: data.cargo });
-    return { summary: `${shipSymbol} → ${receiveShipSymbol}: ${units}x ${tradeSymbol}`, result: data };
+    return { summary: `${shipSymbol} → ${receiveShipSymbol}: ${units}x ${tradeSymbol}`, result: { cargo: compactCargo(data.cargo) } };
   },
 });
 
 registerTool({
   name: "refine",
-  description: "Refine raw goods into processed goods (needs MICRO_REFINERY or ORE_REFINERY module, docked).",
+  description: "Refine raw goods into processed goods (needs a refinery module: MICRO_REFINERY, ORE_REFINERY or FUEL_REFINERY). 100 raw units → 10 processed. Sets a cooldown.",
   kind: "action",
   input: z.object({ shipSymbol: z.string(), produceSymbol: z.string() }),
-  guards: [knownShip, isDocked, shipHasModule("MODULE_")],
+  guards: [knownShip, notInTransit, cooldownClear, shipHasModule("MODULE_MICRO_REFINERY", "MODULE_ORE_REFINERY", "MODULE_FUEL_REFINERY")],
   rateCost: 2,
   handler: async ({ shipSymbol, produceSymbol }, ctx) => {
     const { data } = await api.shipRefine(shipSymbol, produceSymbol);
@@ -161,7 +163,7 @@ registerTool({
   handler: async ({ shipSymbol }, ctx) => {
     await ensureDocked(shipSymbol, await ctx.fresh.ship(shipSymbol));
     const { data } = await api.negotiateContract(shipSymbol);
-    mirror.invalidate(storeKeys.contracts);
+    upsertContract(data.contract);
     return { summary: `negotiated contract ${data.contract.id.slice(0, 8)} (${data.contract.type})`, result: data.contract };
   },
 });
@@ -178,7 +180,7 @@ const install = (name: string, apiFn: (s: string, sym: string) => Promise<{ data
     rateCost: 3,
     handler: async ({ shipSymbol, symbol }) => {
       const { data } = await apiFn(shipSymbol, symbol);
-      if (data.agent) mirror.set(storeKeys.agent, data.agent);
+      observeAgent(data.agent);
       if (data.ship) upsertShip(data.ship);
       return { summary: `${shipSymbol} installed ${symbol} for ${data.transaction?.totalPrice ?? "?"} cr`, result: data };
     },
@@ -219,7 +221,8 @@ registerTool({
   rateCost: 3,
   handler: async ({ shipSymbol }) => {
     const { data } = await api.repairShip(shipSymbol);
-    if (data.agent) mirror.set(storeKeys.agent, data.agent);
+    observeAgent(data.agent);
+    upsertShip(data.ship);
     return { summary: `${shipSymbol} repaired for ${data.transaction?.totalPrice ?? "?"} cr`, result: data };
   },
 });
@@ -233,7 +236,8 @@ registerTool({
   rateCost: 3,
   handler: async ({ shipSymbol }) => {
     const { data } = await api.scrapShip(shipSymbol);
-    mirror.invalidate(storeKeys.fleet);
+    observeAgent(data.agent);
+    removeShip(shipSymbol);
     return { summary: `${shipSymbol} scrapped for ${data.transaction?.totalPrice ?? "?"} cr`, result: data };
   },
 });

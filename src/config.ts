@@ -33,7 +33,7 @@ export const config = {
   dataDir: path.resolve(process.env.DATA_DIR ?? "data"),
   agent: {
     policy: (process.env.AGENT_POLICY === "readonly" ? "readonly" : "full") as AgentPolicy,
-    maxActionsPerWake: num("AGENT_MAX_ACTIONS_PER_WAKE", 8),
+    maxActionsPerWake: num("AGENT_MAX_ACTIONS_PER_WAKE", 32),
     // Action budget scales with fleet size so every ship can get a full job per wake.
     actionsPerShip: num("AGENT_ACTIONS_PER_SHIP", 6),
     // Credits the agent must keep on hand (fuel, cargo capital); ship purchases may not dip below it.
@@ -42,7 +42,6 @@ export const config = {
     autoScanRequests: num("AGENT_AUTO_SCAN_REQUESTS", 8),
     maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 32),
     maxConcurrentTools: num("AGENT_MAX_CONCURRENT_TOOLS", 3),
-    wakeTimeoutMs: num("AGENT_WAKE_TIMEOUT_MS", 180_000),
     fallbackWakeMs: num("AGENT_FALLBACK_WAKE_MS", 10 * 60_000),
     minWakeGapMs: num("AGENT_MIN_WAKE_GAP_MS", 60_000),
   },

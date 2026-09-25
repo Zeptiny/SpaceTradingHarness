@@ -45,7 +45,8 @@ Three inviolable rules:
 - **Do not map tools 1:1 to routes.** The API is rate-limited; `GET /my/ships/{ship}` already returns nav + cargo + fuel + cooldown + modules in one call. Fewer, richer tools = fewer requests burned. 64 routes compress to ~25 tools.
 - **Every mutating tool declares preconditions** (composable guards) that the executor checks *before* spending a request — invalid states fail locally, not with a 4xx from the server.
 - **Every tool declares `rateCost`** (API requests it will burn) so the executor can budget and the panel can display consumption.
-- **Reads always hit the API.** The agent never acts on cached state — every read tool, guard, and working-memory build fetches live data (the transport's rate limiter paces it). API responses are written to a **panel-only state mirror** used solely for user visualization; nothing in the agent path may read it.
+- **Reads always hit the API.** The agent never acts on cached state — every read tool, guard, and working-memory build fetches live data (the transport's rate limiter paces it). The one exception is within a single wake: an identical read repeated *before any action* is answered from that wake's cache, which is cleared as soon as an action executes. API responses are written to a **panel-only state mirror** used solely for user visualization; nothing in the agent path may read it.
+- **Results are compact projections.** Tool results go through `state/projections.ts` (no prose descriptions, no third-party transaction logs) so the fields the agent decides on — prices, supply, routes, cargo — always fit the per-result size cap.
 - **Waiting is a tool.** Long actions (travel, cooldowns) resolve via scheduled wakeups, never polling loops.
 
 ### 2.2 Tool definition contract
@@ -188,8 +189,10 @@ scheduler wakeups ───────┘       │
 | `GET /api/universe` | cached systems + waypoints + ship positions (map data) |
 | `GET /api/events` | SSE stream of typed bus events |
 | `GET /api/tools` | tool registry schemas — panel renders the agent's action space dynamically |
+| `GET /api/markets` | latest snapshot per market the agent has read (compact, with `fetchedAt`) |
 | `GET /api/markets/history` | price history from local memory |
-| `GET /api/activity` | raw activity log, paginated (see §6.3) |
+| `GET /api/credits` | credit balance over time (recorded from every Agent object the harness sees) |
+| `GET /api/activity` | raw activity log (`?wake=N` for one wake's transcript, `?tool=` substring, `?outcome=`) |
 | `GET /api/summaries` | loop summaries + session digests (see §6.3) |
 | `GET /api/plan` | current agent intent from the checkpoint (see §6.3) |
 

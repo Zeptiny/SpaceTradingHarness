@@ -1,5 +1,5 @@
 import { transport } from "../transport/http.js";
-import { mirror, storeKeys, type FleetState } from "./store.js";
+import { mirror, observeAgent, storeKeys, type FleetState } from "./store.js";
 import { prices } from "./prices.js";
 import { atlas } from "./atlas.js";
 import { shipyards } from "./shipyards.js";
@@ -36,7 +36,7 @@ export async function paginate<T>(
 export async function refreshAgent(): Promise<Agent | undefined> {
   try {
     const { data } = await transport.request<Agent>("getMyAgent");
-    mirror.set(storeKeys.agent, data);
+    observeAgent(data);
     return data;
   } catch (err) {
     console.error("[refresh] agent failed:", err instanceof Error ? err.message : err);
@@ -84,7 +84,7 @@ export async function fetchWaypoint(systemSymbol: string, waypointSymbol: string
 
 export async function fetchShipyard(systemSymbol: string, waypointSymbol: string): Promise<Shipyard> {
   const { data } = await transport.request<Shipyard>("getShipyard", { path: { systemSymbol, waypointSymbol } });
-  mirror.set(storeKeys.market(systemSymbol, waypointSymbol) + ":shipyard", data);
+  mirror.set(storeKeys.shipyard(systemSymbol, waypointSymbol), data);
   shipyards.record(data);
   return data;
 }
