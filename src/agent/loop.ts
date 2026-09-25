@@ -27,8 +27,9 @@ How you work:
 - Reason freely in your reply text. Act by calling tools — batch as many as you like per turn; the harness executes them with bounded concurrency and rate-limits the API for you. Results come back each round and you think again.
 - This conversation is your working memory for the whole wake: every tool call and result stays in context. Before re-fetching data, check what you already have — identical repeat reads are answered from cache without hitting the API.
 - You decide when the wake ends: call end_loop when there is nothing more worth doing — optionally with wakeAt (ISO) to choose the next wake time. Ship arrivals and cooldowns are auto-scheduled from tool results regardless.
-- Guards fail locally before any action request is sent — read the reason and adapt (fetch market/waypoint data, refuel, move a ship to the shipyard).
-- Identical reads within a wake are answered from cache until you take an action; after any action, reads hit the API again.
+- Guards fail locally before any action request is sent — read the reason and adapt (fetch market/waypoint data, refuel, move a ship to the shipyard). Guards read live server state: a rejection is never stale cache or clock skew.
+- Every tool result carries now (current time). A ship IN_TRANSIT or on cooldown cannot act until the time its rejection names; don't retry before then. Use wait_for_ship for short waits, otherwise give other ships work or end_loop.
+- Identical reads within a wake are answered from cache for up to 30s, until you take an action or wait; after that, reads hit the API again.
 - When you finish, call end_loop with a short summary for the human operator.
 
 Strategy:
@@ -272,6 +273,7 @@ async function think(messages: ChatMessage[]): Promise<PlanResponse> {
 // Tool results are compact projections (see state/projections.ts); the cap is
 // a backstop for unusually large payloads, not the normal path.
 const MAX_TOOL_RESULT_CHARS = 8_000;
+const READ_CACHE_TTL_MS = 30_000;
 const MAX_CONTEXT_CHARS = 150_000;
 const ELIDED = "[elided for context budget]";
 
@@ -286,9 +288,12 @@ function stableKey(v: unknown): string {
 }
 
 function toolMessageFor(callId: string, o: ExecOutcome): ChatMessage {
+  // `now` gives the agent a clock: working memory's timestamp is only the
+  // wake start, and arrivals/cooldowns are absolute server times.
+  const now = new Date().toISOString();
   const payload = o.outcome === "ok"
-    ? { summary: o.summary, result: o.result ?? null }
-    : { outcome: o.outcome, summary: o.summary };
+    ? { now, summary: o.summary, result: o.result ?? null }
+    : { now, outcome: o.outcome, summary: o.summary };
   let content = JSON.stringify(payload);
   if (content.length > MAX_TOOL_RESULT_CHARS) {
     content = `${content.slice(0, MAX_TOOL_RESULT_CHARS)}…[truncated ${content.length - MAX_TOOL_RESULT_CHARS} chars — request narrower data]`;
@@ -356,9 +361,10 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
 
     const messages: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT }];
     // Identical reads within a wake are served from here — but only until the
-    // agent mutates game state; any executed action clears it so later reads
-    // (ship, market, contracts) reflect the action.
-    const readCache = new Map<string, unknown>();
+    // agent mutates game state (any executed action clears it so later reads
+    // reflect the action), time moves on (entries expire, and wait_for_ship
+    // clears it), since a ship read mid-transit goes stale on arrival.
+    const readCache = new Map<string, { at: number; result: unknown }>();
     let plan: AgentPlan | null = null;
     // Sized once the fleet is known (round 0) so each ship can get a full job.
     let actionsLeft = config.agent.maxActionsPerWake;
@@ -368,22 +374,24 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       if (def?.kind !== "read") {
         const outcome = await executeTool(call.tool, call.args ?? {});
         if (def?.kind === "action" && (outcome.outcome === "ok" || outcome.outcome === "api-error")) readCache.clear();
+        if (call.tool === "wait_for_ship") readCache.clear();
         return outcome;
       }
       const norm = def.input.safeParse(call.args ?? {});
       const key = norm.success ? `${call.tool}|${stableKey(norm.data)}` : null;
-      if (key && readCache.has(key)) {
+      const hit = key ? readCache.get(key) : undefined;
+      if (hit && Date.now() - hit.at < READ_CACHE_TTL_MS) {
         const outcome: ExecOutcome = {
           tool: call.tool,
           outcome: "ok",
-          summary: "cached: identical read already executed this wake (no action since) — result re-sent, no API call",
-          result: readCache.get(key),
+          summary: `cached: identical read ${Math.round((Date.now() - hit.at) / 1000)}s ago (no action since) — result re-sent, no API call`,
+          result: hit.result,
         };
         recordCachedOutcome(outcome, call.args ?? {});
         return outcome;
       }
       const outcome = await executeTool(call.tool, call.args ?? {});
-      if (key && outcome.outcome === "ok") readCache.set(key, outcome.result);
+      if (key && outcome.outcome === "ok") readCache.set(key, { at: Date.now(), result: outcome.result });
       return outcome;
     };
 

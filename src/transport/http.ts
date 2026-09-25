@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { config } from "../config.js";
 import { bus } from "../events/bus.js";
 import { runtime } from "../state/runtime.js";
+import { parseReset } from "../state/ratelimit.js";
 import { routes, type RouteName } from "../generated/routes.js";
 
 export class SpaceTradersError extends Error {
@@ -150,13 +151,16 @@ class Transport {
   }
 
   private trackRate(headers: Headers): void {
-    const limit = headers.get("x-req-ratelimit-limit");
-    const remaining = headers.get("x-req-ratelimit-remaining");
-    const reset = headers.get("x-req-ratelimit-reset");
+    // SpaceTraders v2 sends x-ratelimit-{limit-burst,remaining,reset} (reset
+    // as an ISO date); the older x-req-ratelimit-* names are kept as fallback.
+    const h = (...names: string[]) => names.map(n => headers.get(n)).find(v => v !== null) ?? null;
+    const limit = h("x-ratelimit-limit-burst", "x-ratelimit-limit", "x-req-ratelimit-limit");
+    const remaining = h("x-ratelimit-remaining", "x-req-ratelimit-remaining");
+    const reset = parseReset(h("x-ratelimit-reset", "x-req-ratelimit-reset"));
     const prev = this.rate.remaining;
-    this.rate.limit = limit !== null ? Number(limit) : this.rate.limit;
-    this.rate.remaining = remaining !== null ? Number(remaining) : this.rate.remaining;
-    this.rate.resetAt = reset !== null ? Number(reset) : this.rate.resetAt;
+    this.rate.limit = limit !== null && Number.isFinite(Number(limit)) ? Number(limit) : this.rate.limit;
+    this.rate.remaining = remaining !== null && Number.isFinite(Number(remaining)) ? Number(remaining) : this.rate.remaining;
+    this.rate.resetAt = reset ?? this.rate.resetAt;
     runtime.rate = {
       limit: this.rate.limit,
       remaining: this.rate.remaining,
