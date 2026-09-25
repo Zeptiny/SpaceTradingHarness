@@ -149,6 +149,31 @@ class Transport {
     }
   }
 
+  /**
+   * GETs a path the spec does not list (the bulk `/systems.json` dump) through
+   * the same queue and pacing as every other request. One attempt, no retries:
+   * callers treat any failure as "not available" and fall back.
+   */
+  requestRaw<T = unknown>(pathname: string, timeoutMs: number): Promise<T> {
+    const run = async (): Promise<T> => {
+      await this.pace();
+      const counter = requestCounter.getStore();
+      if (counter) counter.n++;
+      runtime.requestsTotal++;
+      const res = await fetch(config.baseUrl + pathname, {
+        headers: { Accept: "application/json", Authorization: `Bearer ${config.apiToken}` },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      this.trackRate(res.headers);
+      this.rate.lastRequestAt = Date.now();
+      if (!res.ok) throw new SpaceTradersError(res.status, 0, `${pathname}: ${res.statusText}`);
+      return (await res.json()) as T;
+    };
+    const result = this.queue.then(run, run);
+    this.queue = result.catch(() => undefined);
+    return result;
+  }
+
   private async pace(): Promise<void> {
     const since = Date.now() - this.rate.lastRequestAt;
     const wait = config.transport.minIntervalMs - since;

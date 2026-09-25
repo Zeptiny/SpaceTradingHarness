@@ -287,6 +287,39 @@ class Atlas {
     return Object.values(this.data.gates);
   }
 
+  /** Every system record read so far (fleet systems and gate neighbors). */
+  allSystems(): KnownSystem[] {
+    return Object.values(this.data.systems);
+  }
+
+  /** Known jump links as system pairs, each once (for the panel's galaxy map). */
+  gateLinks(): [string, string][] {
+    const links = new Map<string, [string, string]>();
+    for (const g of Object.values(this.data.gates)) {
+      for (const conn of g.connections) {
+        const pair = [g.system, systemOf(conn)].sort() as [string, string];
+        links.set(pair.join(" "), pair);
+      }
+    }
+    return [...links.values()];
+  }
+
+  /** What the harness has learned about each system it has read (for the panel's galaxy map). */
+  systemIntel(): Record<string, { mapped: boolean; scouted: boolean; shipyards: number; markets: number; gate: boolean }> {
+    const out: ReturnType<Atlas["systemIntel"]> = {};
+    for (const sys of Object.values(this.data.systems)) {
+      const wps = this.inSystem(sys.symbol);
+      out[sys.symbol] = {
+        mapped: sys.mapped,
+        scouted: sys.scouted,
+        shipyards: wps.filter(w => w.traits.includes("SHIPYARD")).length,
+        markets: wps.filter(w => w.traits.includes("MARKETPLACE")).length,
+        gate: (sys.waypointTypes["JUMP_GATE"] ?? 0) > 0 || wps.some(w => w.type === "JUMP_GATE"),
+      };
+    }
+    return out;
+  }
+
   inSystem(system: string): KnownWaypoint[] {
     return Object.values(this.data.waypoints).filter(w => w.system === system);
   }
