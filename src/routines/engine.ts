@@ -94,6 +94,8 @@ async function contractNeeds(): Promise<ContractNeed[]> {
   return needs;
 }
 
+const MINABLE_TYPES = ["ASTEROID", "ASTEROID_FIELD", "ENGINEERED_ASTEROID"];
+
 async function buildWorld(rec: RoutineRecord): Promise<World> {
   const seen = prices.marketsSeen();
   return {
@@ -107,6 +109,10 @@ async function buildWorld(rec: RoutineRecord): Promise<World> {
       .map(w => ({ symbol: w.symbol, pricedAt: seen.get(w.symbol) ?? null })),
     claimed: routines.running().filter(r => r.ship !== rec.ship && r.target).map(r => r.target!),
     map: liveMap,
+    uncharted: system => atlas.inSystem(system).filter(w => w.traits.includes("UNCHARTED")).map(w => w.symbol),
+    asteroids: system => atlas.inSystem(system)
+      .filter(w => MINABLE_TYPES.includes(w.type))
+      .map(w => ({ symbol: w.symbol, deposits: w.traits.filter(t => t.endsWith("_DEPOSITS") || t === "ICE_CRYSTALS"), depleted: atlas.depleted(w.symbol) })),
   };
 }
 
@@ -152,6 +158,7 @@ async function execute(ship: string, step: Step): Promise<ExecOutcome | null> {
       await fetchMarket(systemOf(step.waypoint), step.waypoint);
       return null;
     }
+    case "chart": return run("chart_waypoint", {});
     default: return null;
   }
 }

@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { api } from "../client/index.js";
 import { observeAgent, removeShip, upsertContract, upsertShip } from "../state/store.js";
-import { compactCargo } from "../state/projections.js";
+import { actionIncidents, compactCargo } from "../state/projections.js";
+import { atlas } from "../state/atlas.js";
 import { compactSurvey, surveys } from "../state/surveys.js";
 import { registerTool } from "./registry.js";
 import {
@@ -13,6 +14,8 @@ import { cooldownNote, cooldownWakeAt } from "../utils/time.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
 import { earnings } from "../state/earnings.js";
 import { expectArrival } from "../state/arrivals.js";
+import { chartWaypoint, fetchWaypoint } from "../state/refresh.js";
+import { systemOf } from "../utils/symbols.js";
 
 // ---- Cross-system travel ----
 
@@ -28,7 +31,7 @@ registerTool({
     const ship = await ctx.fresh.ship(shipSymbol);
     if (ship) upsertShip({ ...ship, nav: data.nav, fuel: data.fuel });
     return {
-      summary: `${shipSymbol} warping to ${waypointSymbol}, fuel ${data.fuel.current}/${data.fuel.capacity}`,
+      summary: `${shipSymbol} warping to ${waypointSymbol}, fuel ${data.fuel.current}/${data.fuel.capacity}${actionIncidents(data.events).note}`,
       result: data,
       followUpWakeAt: data.nav.route?.arrival ? Date.parse(data.nav.route.arrival) + 2000 : undefined,
       followUpReason: `${shipSymbol} warp arrival`,
@@ -117,8 +120,9 @@ registerTool({
       throw err;
     });
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
+    if (data.modifiers) atlas.recordModifiers(survey.symbol, data.modifiers);
     return {
-      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol} (surveyed), cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}`,
+      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol} (surveyed), cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}${actionIncidents(data.events, data.modifiers).note}`,
       result: data,
       followUpWakeAt: cooldownWakeAt(data.cooldown),
       followUpReason: `${shipSymbol} extraction cooldown done`,
@@ -232,6 +236,54 @@ install("install_module", (s, sym) => api.installModule(s, sym), "module");
 remove("remove_module", (s, sym) => api.removeModule(s, sym), "module");
 install("install_mount", (s, sym) => api.installMount(s, sym), "mount");
 remove("remove_mount", (s, sym) => api.removeMount(s, sym), "mount");
+
+// ---- Construction & charting ----
+
+registerTool({
+  name: "supply_construction",
+  description: "Deliver construction materials from a ship's cargo to the construction site at the waypoint where the ship is (e.g. an unfinished jump gate; auto-docks). Pays nothing itself; a finished gate opens jumps to the neighbouring systems. gates[].finishCost in working memory says what is still missing and where it is cheapest.",
+  kind: "action",
+  input: z.object({ shipSymbol: z.string(), tradeSymbol: z.string(), units: z.number().int().positive() }),
+  guards: [knownShip, notInTransit, cargoHasGood],
+  rateCost: 2,
+  handler: async ({ shipSymbol, tradeSymbol, units }, ctx) => {
+    const ship = await ctx.fresh.ship(shipSymbol);
+    if (!ship) throw new Error(`${shipSymbol} not found`);
+    const wp = ship.nav.waypointSymbol;
+    await ensureDocked(shipSymbol, ship);
+    const { data } = await api.supplyConstruction(systemOf(wp), wp, shipSymbol, tradeSymbol, units);
+    upsertShip({ ...ship, cargo: data.cargo });
+    atlas.recordConstruction(data.construction);
+    const left = (data.construction.materials ?? []).filter(m => m.fulfilled < m.required).map(m => `${m.tradeSymbol} ${m.fulfilled}/${m.required}`);
+    return {
+      summary: `${shipSymbol} supplied ${units}x ${tradeSymbol} to ${wp}; ${data.construction.isComplete ? "construction complete" : `still needed: ${left.join(", ") || "none"}`}`,
+      result: { construction: data.construction, cargo: compactCargo(data.cargo) },
+    };
+  },
+});
+
+registerTool({
+  name: "chart_waypoint",
+  description: "Chart the UNCHARTED waypoint where the ship is: reveals its traits (a hidden market, shipyard or deposit) and pays a one-time reward. The harness already does this when a ship arrives at an uncharted waypoint, and scout routines visit uncharted waypoints.",
+  kind: "action",
+  input: z.object({ shipSymbol: z.string() }),
+  guards: [knownShip, notInTransit],
+  rateCost: 1,
+  handler: async ({ shipSymbol }, ctx) => {
+    const ship = await ctx.fresh.ship(shipSymbol);
+    try {
+      const { waypoint, reward } = await chartWaypoint(shipSymbol);
+      return {
+        summary: `${shipSymbol} charted ${waypoint.symbol} (+${reward} cr): ${waypoint.traits.map(t => t.symbol).join(", ") || "no traits"}`,
+        result: { waypoint: waypoint.symbol, reward, traits: waypoint.traits.map(t => t.symbol) },
+      };
+    } catch (err) {
+      // Charted by someone else meanwhile (or never uncharted): refresh the traits so nothing retries forever.
+      if (ship) await fetchWaypoint(ship.nav.systemSymbol, ship.nav.waypointSymbol).catch(() => undefined);
+      throw err;
+    }
+  },
+});
 
 // ---- Repair & scrap ----
 

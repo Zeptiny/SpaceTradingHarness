@@ -1,4 +1,4 @@
-import type { Contract, Faction, Market, Ship, ShipCargo, Shipyard, Waypoint } from "../generated/types.js";
+import type { Contract, Faction, Market, Ship, ShipCargo, ShipConditionEvent, Shipyard, Waypoint, WaypointModifier } from "../generated/types.js";
 
 // Compact projections shared by tool results, working memory and the panel.
 // They drop prose (names/descriptions) and third-party logs so the data the
@@ -41,6 +41,51 @@ export function compactShip(s: Ship) {
       : null,
     mounts: s.mounts.map(m => m.symbol),
     modules: s.modules.map(m => m.symbol),
+    ...(shipWear(s).length ? { wear: shipWear(s) } : {}),
+  };
+}
+
+// Condition is repairable wear (repair_ship at a shipyard restores it);
+// integrity is permanent and only drops. Both run 0..1.
+export const WEAR_SHOWN_BELOW = 0.9;
+export const WEAR_ALERT_BELOW = 0.5;
+
+export interface ComponentWear {
+  component: "FRAME" | "REACTOR" | "ENGINE";
+  condition: number;
+  integrity: number;
+}
+
+/** Components whose condition or integrity is below WEAR_SHOWN_BELOW, most worn first. */
+export function shipWear(s: Ship): ComponentWear[] {
+  const parts: [ComponentWear["component"], { condition?: number; integrity?: number } | undefined][] = [
+    ["FRAME", s.frame], ["REACTOR", s.reactor], ["ENGINE", s.engine],
+  ];
+  const round = (n: number | undefined) => Math.round((n ?? 1) * 100) / 100;
+  return parts
+    .map(([component, c]) => ({ component, condition: round(c?.condition), integrity: round(c?.integrity) }))
+    .filter(w => w.condition < WEAR_SHOWN_BELOW || w.integrity < WEAR_SHOWN_BELOW)
+    .sort((a, b) => a.condition - b.condition);
+}
+
+/**
+ * Damage events and waypoint modifiers some action responses carry
+ * (navigate, warp, extract, siphon). Returns a summary suffix and a compact
+ * list; both empty when nothing happened.
+ */
+export function actionIncidents(events: ShipConditionEvent[] | undefined, modifiers?: WaypointModifier[] | undefined): {
+  note: string;
+  incidents: { damage?: string[]; waypointModifiers?: string[] };
+} {
+  const damage = (events ?? []).map(e => `${e.component} ${e.symbol}`);
+  const mods = (modifiers ?? []).map(m => m.symbol);
+  const parts = [
+    damage.length ? `wear: ${damage.join(", ")}` : "",
+    mods.length ? `waypoint ${mods.join(", ")}` : "",
+  ].filter(Boolean);
+  return {
+    note: parts.length ? `; ${parts.join("; ")}` : "",
+    incidents: { ...(damage.length ? { damage } : {}), ...(mods.length ? { waypointModifiers: mods } : {}) },
   };
 }
 
@@ -177,6 +222,8 @@ export function fleetTable(
     const r = routineOf(s.symbol);
     const routine = r ? ` | routine: ${r.description} (${r.phase})` : "";
     const fuel = s.fuel.capacity > 0 ? ` | fuel ${s.fuel.current}/${s.fuel.capacity}` : "";
-    return `${s.symbol} ${frame} | ${where} | cargo ${s.cargo.units}/${s.cargo.capacity}${goods ? ` ${goods}` : ""}${fuel}${state}${routine}`;
+    const worst = shipWear(s)[0];
+    const wear = worst && worst.condition < WEAR_ALERT_BELOW ? ` | worn ${worst.component} ${worst.condition}` : "";
+    return `${s.symbol} ${frame} | ${where} | cargo ${s.cargo.units}/${s.cargo.capacity}${goods ? ` ${goods}` : ""}${fuel}${state}${wear}${routine}`;
   }).join("\n");
 }

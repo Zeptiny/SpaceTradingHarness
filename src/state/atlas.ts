@@ -1,4 +1,4 @@
-import type { Construction, JumpGate, Market, System, Waypoint } from "../generated/types.js";
+import type { Construction, JumpGate, Market, System, Waypoint, WaypointModifier } from "../generated/types.js";
 import { loadJson, saveJsonAtomic, dataFile } from "./persist.js";
 import { systemOf } from "../utils/symbols.js";
 
@@ -18,6 +18,10 @@ export interface KnownWaypoint {
   y: number;
   traits: string[];
   underConstruction?: boolean | undefined;
+  /** Temporary conditions (STRIPPED, UNSTABLE, CRITICAL_LIMIT, RADIATION_LEAK, CIVIL_UNREST); they come and go. */
+  modifiers?: string[] | undefined;
+  /** When the modifiers were last confirmed (they wear off, so old ones stop counting). */
+  modifiersAt?: number | undefined;
 }
 
 export interface KnownSystem {
@@ -64,12 +68,21 @@ export interface AtlasData {
 /** Traits worth surfacing to the agent; the rest are flavor. */
 const USEFUL_TRAITS = new Set([
   "MARKETPLACE", "SHIPYARD", "COMMON_METAL_DEPOSITS", "PRECIOUS_METAL_DEPOSITS", "RARE_METAL_DEPOSITS",
-  "MINERAL_DEPOSITS", "EXPLOSIVE_GASES", "ICE_CRYSTALS", "STRIPPED", "UNSTABLE_COMPOSITION",
+  "MINERAL_DEPOSITS", "EXPLOSIVE_GASES", "ICE_CRYSTALS", "STRIPPED", "UNSTABLE_COMPOSITION", "UNCHARTED",
 ]);
 
 /** Drops flavor traits (see USEFUL_TRAITS) so waypoint lists stay compact. */
 export function usefulTraits(traits: string[]): string[] {
   return traits.filter(t => USEFUL_TRAITS.has(t));
+}
+
+/** Modifiers that mark an asteroid as over-mined: yields drop, and mining on risks making it worse. */
+export const DEPLETED_MODIFIERS = ["STRIPPED", "CRITICAL_LIMIT", "UNSTABLE"];
+export const DEPLETION_MEMORY_MS = 2 * 3600_000;
+const MODIFIER_REFRESH_MS = 5 * 60_000;
+
+export function isDepleted(w: KnownWaypoint | undefined, now: number): boolean {
+  return !!w?.modifiers?.some(m => DEPLETED_MODIFIERS.includes(m)) && now - (w.modifiersAt ?? 0) < DEPLETION_MEMORY_MS;
 }
 
 const emptyData = (): AtlasData => ({ waypoints: {}, systems: {}, gates: {}, construction: {}, markets: {} });
@@ -90,6 +103,7 @@ export type MapEntry = {
   x: number;
   y: number;
   traits: string[];
+  modifiers?: string[];
   exports?: string[];
   imports?: string[];
   exchange?: string[];
@@ -110,14 +124,43 @@ export interface GateSummary {
   gate: string;
   underConstruction: boolean | null;
   construction?: string | undefined;
+  /** Credits to buy every missing material at the cheapest known price (a floor: prices rise as you buy). */
+  finishCost?: FinishCost | undefined;
   connections: GateConnection[] | null;
+}
+
+export interface FinishCost {
+  atLeast: number;
+  /** Missing materials with no known source price (not in atLeast). */
+  unpriced: string[];
+  /** "GOOD missing×price @ waypoint" per priced material. */
+  sources: string[];
+}
+
+export type PriceLookup = (good: string) => { youPay: number; at: string } | null;
+
+/** Pure: cost to buy what a construction site still needs. Null when nothing is missing. */
+export function finishCost(materials: KnownConstruction["materials"], priceOf: PriceLookup): FinishCost | null {
+  const missing = materials.map(m => ({ good: m.good, units: Math.max(0, m.required - m.fulfilled) })).filter(m => m.units > 0);
+  if (!missing.length) return null;
+  const out: FinishCost = { atLeast: 0, unpriced: [], sources: [] };
+  for (const m of missing) {
+    const p = priceOf(m.good);
+    if (!p) {
+      out.unpriced.push(m.good);
+      continue;
+    }
+    out.atLeast += m.units * p.youPay;
+    out.sources.push(`${m.good} ${m.units}×${p.youPay} @ ${p.at}`);
+  }
+  return out;
 }
 
 /**
  * Pure: the jump-gate view of the given systems. Connections nearest first,
  * capped, with what the harness knows about each neighbor.
  */
-export function summarizeGates(data: AtlasData, systems: string[], maxConnections = 12): GateSummary[] {
+export function summarizeGates(data: AtlasData, systems: string[], maxConnections = 12, priceOf?: PriceLookup): GateSummary[] {
   const out: GateSummary[] = [];
   for (const system of systems) {
     const gateWp = Object.values(data.waypoints).find(w => w.system === system && w.type === "JUMP_GATE");
@@ -154,6 +197,7 @@ export function summarizeGates(data: AtlasData, systems: string[], maxConnection
       construction: cons && !cons.isComplete
         ? cons.materials.map(m => `${m.good} ${m.fulfilled}/${m.required}`).join(", ")
         : undefined,
+      finishCost: cons && !cons.isComplete && priceOf ? finishCost(cons.materials, priceOf) ?? undefined : undefined,
       connections,
     });
   }
@@ -187,13 +231,47 @@ class Atlas {
         y: w.y,
         traits: traits.length ? traits : prev?.traits ?? [],
         underConstruction: typeof w.isUnderConstruction === "boolean" ? w.isUnderConstruction : prev?.underConstruction,
+        // Modifiers are only trusted from a full record (one with traits); scans from afar leave the known ones.
+        modifiers: traits.length && w.modifiers ? w.modifiers.map(m => m.symbol) : prev?.modifiers,
+        modifiersAt: traits.length && w.modifiers?.length ? Date.now() : prev?.modifiersAt,
       };
+      if (!next.modifiers?.length) {
+        delete next.modifiers;
+        delete next.modifiersAt;
+      }
       if (JSON.stringify(prev) !== JSON.stringify(next)) {
         this.data.waypoints[w.symbol] = next;
         changed = true;
       }
     }
     if (changed) this.persist();
+  }
+
+  /** Modifiers reported by an extraction at the waypoint (the extract response carries them). */
+  recordModifiers(symbol: string, modifiers: WaypointModifier[]): void {
+    const w = this.data.waypoints[symbol];
+    if (!w) return;
+    const next = modifiers.map(m => m.symbol);
+    const same = JSON.stringify(w.modifiers ?? []) === JSON.stringify(next);
+    // Re-confirming the same modifiers only refreshes their time every few minutes.
+    if (same && (!next.length || Date.now() - (w.modifiersAt ?? 0) < MODIFIER_REFRESH_MS)) return;
+    if (next.length) {
+      w.modifiers = next;
+      w.modifiersAt = Date.now();
+    } else {
+      delete w.modifiers;
+      delete w.modifiersAt;
+    }
+    this.persist();
+  }
+
+  /**
+   * True while the waypoint was recently seen with a modifier that means it
+   * is over-mined. Old sightings stop counting after DEPLETION_MEMORY_MS so a
+   * miner goes back and the next extraction reports the current state.
+   */
+  depleted(symbol: string, now = Date.now()): boolean {
+    return isDepleted(this.data.waypoints[symbol], now);
   }
 
   recordSystem(s: System): void {
@@ -340,8 +418,9 @@ class Atlas {
         .map(w => ({ ...w, traits: w.traits.filter(t => USEFUL_TRAITS.has(t)) }))
         .filter(w => w.traits.length || /ASTEROID|GAS_GIANT/.test(w.type))
         .sort((a, b) => a.symbol.localeCompare(b.symbol))
-        .map(({ symbol, type, x, y, traits }) => {
+        .map(({ symbol, type, x, y, traits, modifiers }) => {
           const entry: MapEntry = { symbol, type, x, y, traits };
+          if (modifiers?.length) entry.modifiers = modifiers;
           const m = this.data.markets[symbol];
           if (m?.exports.length) entry.exports = m.exports;
           if (m?.imports.length) entry.imports = m.imports;
@@ -351,8 +430,8 @@ class Atlas {
     }));
   }
 
-  gates(systems: string[]): GateSummary[] {
-    return summarizeGates(this.data, systems);
+  gates(systems: string[], priceOf?: PriceLookup): GateSummary[] {
+    return summarizeGates(this.data, systems, 12, priceOf);
   }
 }
 

@@ -571,5 +571,18 @@ scheduler.schedule(now + 25_000, "NYUU-3 extraction cooldown done", "NYUU-3");
 scheduler.schedule(now + 3.5 * MIN + 2_000, "NYUU-4 arrival at X1-KD26-H51", "NYUU-4");
 scheduler.schedule(now + 11 * MIN + 2_000, "NYUU-6 arrival at X1-KD26-A1", "NYUU-6");
 
+// Server status fixture for the Overview leaderboard (this agent sits just outside the top 10).
+const { setServerInfo } = await import("./state/universe.js");
+setServerInfo({
+  resetDate: "2026-09-21",
+  nextReset: "2026-10-05T16:00:00Z",
+  resetFrequency: "fortnightly",
+  leaderboards: {
+    mostCredits: ["VOID", "KESTREL", "ORBITAL", "MIRA", "TYCHO", "HALCYON", "BRAVO7", "ZENITH", "QUARK", "LUMEN"]
+      .map((agentSymbol, i) => ({ agentSymbol, credits: Math.round(48_000_000 / (i + 1) ** 1.3) })),
+    mostSubmittedCharts: ["KESTREL", AGENT, "MIRA", "SCOUTS", "VOID"].map((agentSymbol, i) => ({ agentSymbol, chartCount: 2400 - i * 430 })),
+  },
+  fetchedAt: Date.now(),
+});
 startPanel();
 console.log(`[demo] seeded fixture state in ${dataDir}; simulated wakes run every ~45s`);

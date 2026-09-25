@@ -136,7 +136,7 @@ const S = {
 const UI = {
   view: "overview", conn: "connecting", lastEventAt: 0,
   selWake: null, logQuery: "", logIssues: false, openCalls: new Set(),
-  fleetFilter: "", creditRange: 24,
+  fleetFilter: "", creditRange: 24, lbTab: "credits",
   mapSystem: null, mapSel: null, mapView: null,
   galView: null, galSel: null, galHover: null,
   marketTab: "opps", marketSel: null, marketQuery: "",
@@ -482,7 +482,8 @@ VIEWS.overview = {
         ${panel("Agent · now", '<div class="now-card" id="nowBody"></div>', { cls: "span-4", aside: '<span id="nowAside"></span>' })}
         ${panel("Fleet", '<div class="table-wrap" id="miniFleet"></div>', { cls: "span-8", bodyCls: "panel-body flush", aside: '<a href="#/fleet">all ships →</a>' })}
         ${panel("Alerts", '<div class="alerts" id="alertList"></div>', { cls: "span-4" })}
-        ${panel("Recent wakes", '<div class="wake-list" id="wakeList"></div>', { cls: "span-12", bodyCls: "panel-body flush", aside: '<a href="#/activity">full log →</a>' })}
+        ${panel("Recent wakes", '<div class="wake-list" id="wakeList"></div>', { cls: "span-8", bodyCls: "panel-body flush", aside: '<a href="#/activity">full log →</a>' })}
+        ${panel("Leaderboard", '<div id="leaderboard"></div>', { cls: "span-4", bodyCls: "panel-body flush", aside: '<div class="chips" id="lbChips"></div>' })}
       </div>`;
   },
   update() {
@@ -558,6 +559,8 @@ VIEWS.overview = {
     patch($("#alertList"), al.length ? al.map(a => `<div class="alert ${a.lvl}">${icon(a.lvl === "info" ? "info" : "warn")}<div>${a.href ? `<a href="${esc(a.href)}" style="color:inherit">${esc(a.text)}</a>` : esc(a.text)}${a.sub ? `<div class="alert-sub">${esc(a.sub)}</div>` : ""}</div></div>`).join("")
       : `<div class="alert info">${icon("info")}<div>All clear<div class="alert-sub">No low fuel, deadlines or failing wakes.</div></div></div>`);
 
+    renderLeaderboard();
+
     // wakes
     patch($("#wakeList"), S.wakes.slice(0, 8).map(w => {
       const delta = wakeDelta(w);
@@ -568,6 +571,33 @@ VIEWS.overview = {
     }).join("") || empty("No wakes yet."));
   },
 };
+
+// Server leaderboards from GET / (the harness re-reads it every ~15 min).
+// Shown to the operator only; the agent never sees it.
+function renderLeaderboard() {
+  const lb = S.state?.server?.leaderboards;
+  const me = S.state?.agent?.symbol ?? null;
+  const tabs = [["credits", "Credits"], ["charts", "Charts"]];
+  patch($("#lbChips"), tabs.map(([k, l]) => `<button class="chip-btn" data-act="lb-tab" data-k="${k}" aria-pressed="${UI.lbTab === k}">${l}</button>`).join(""));
+  if (!lb) {
+    patch($("#leaderboard"), empty("No leaderboard yet.", "It is read from the server status while the agent sleeps."));
+    return;
+  }
+  const credits = UI.lbTab === "credits";
+  const rows = credits
+    ? (lb.mostCredits ?? []).map(r => ({ agent: r.agentSymbol, value: r.credits }))
+    : (lb.mostSubmittedCharts ?? []).map(r => ({ agent: r.agentSymbol, value: r.chartCount }));
+  const rank = rows.findIndex(r => r.agent === me);
+  let foot = "";
+  if (me && rank < 0) {
+    const last = rows.at(-1);
+    const mine = credits ? creditsNow() : null;
+    foot = `<div class="lb-foot"><span class="mono">${esc(me)}</span> is outside the top ${rows.length}${credits && isNum(mine) && last ? ` · <b>${esc(fmtCompact(last.value - mine))}</b> credits short of #${rows.length}` : ""}</div>`;
+  } else if (rank >= 0) {
+    foot = `<div class="lb-foot">You are <b>#${rank + 1}</b>${rank > 0 ? ` · ${esc(fmtCompact(rows[rank - 1].value - rows[rank].value))} behind #${rank}` : ""}</div>`;
+  }
+  patch($("#leaderboard"), rows.length ? `<table class="table lb"><tbody>${rows.map((r, i) => `<tr class="${r.agent === me ? "me" : ""}"><td class="num muted">${i + 1}</td><td class="mono">${esc(r.agent)}</td><td class="num r">${esc(credits ? fmtCompact(r.value) : fmtInt(r.value))}</td></tr>`).join("")}</tbody></table>${foot}` : empty("The leaderboard is empty."));
+}
 
 // ---------------------------------------------------------------- fleet
 VIEWS.fleet = {
@@ -1524,6 +1554,7 @@ document.addEventListener("click", async e => {
   const act = el.dataset.act;
   switch (act) {
     case "range": UI.creditRange = Number(el.dataset.h); VIEWS.overview.update(); break;
+    case "lb-tab": UI.lbTab = el.dataset.k; renderLeaderboard(); break;
     case "goto": location.hash = el.dataset.href; break;
     case "fleet-filter": UI.fleetFilter = el.dataset.k; VIEWS.fleet.update(); break;
     case "pick-wake": {

@@ -3,7 +3,7 @@ import { atlas } from "./atlas.js";
 import { prices } from "./prices.js";
 import { shipyards } from "./shipyards.js";
 import { runtime } from "./runtime.js";
-import { fetchMarket, fetchShipyard, fetchWaypoint } from "./refresh.js";
+import { chartWaypoint, fetchMarket, fetchShipyard, fetchWaypoint } from "./refresh.js";
 import { systemOf } from "../utils/symbols.js";
 
 /**
@@ -28,7 +28,7 @@ export function expectArrival(ship: string, waypoint: string, arrival: string | 
   if (prev) clearTimeout(prev);
   const timer = setTimeout(() => {
     timers.delete(ship);
-    void readAt(waypoint).catch(err => {
+    void readAt(waypoint, ship).catch(err => {
       console.warn(`[arrivals] read at ${waypoint} failed:`, err instanceof Error ? err.message : err);
     });
   }, Math.min(delay, 2 ** 31 - 1));
@@ -36,8 +36,8 @@ export function expectArrival(ship: string, waypoint: string, arrival: string | 
   timers.set(ship, timer);
 }
 
-export async function readAt(waypoint: string): Promise<{ market: boolean; shipyard: boolean }> {
-  const out = { market: false, shipyard: false };
+export async function readAt(waypoint: string, ship?: string): Promise<{ market: boolean; shipyard: boolean; charted: number | null }> {
+  const out = { market: false, shipyard: false, charted: null as number | null };
   if (runtime.paused) return out;
   const system = systemOf(waypoint);
   let known = atlas.get(waypoint);
@@ -46,6 +46,13 @@ export async function readAt(waypoint: string): Promise<{ market: boolean; shipy
     known = atlas.get(waypoint);
   }
   if (!known) return out;
+  // An uncharted waypoint hides its traits (a market or shipyard included); charting reveals them and pays a reward.
+  if (ship && config.agent.autoChart && config.agent.policy !== "readonly" && known.traits.includes("UNCHARTED")) {
+    const { reward } = await chartWaypoint(ship);
+    out.charted = reward;
+    console.log(`[arrivals] ${ship} charted ${waypoint} (+${reward} cr)`);
+    known = atlas.get(waypoint) ?? known;
+  }
   const pricedAt = prices.marketsSeen().get(waypoint);
   if (known.traits.includes("MARKETPLACE") && !(pricedAt && Date.now() - pricedAt < FRESH_MS)) {
     await fetchMarket(system, waypoint);

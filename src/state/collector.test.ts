@@ -87,3 +87,34 @@ test("gate summary: construction progress and scouted neighbors nearest first", 
 test("gate summary is empty for a system without a known gate", () => {
   assert.deepEqual(summarizeGates(empty(), ["X1-A"]), []);
 });
+
+test("atlas keeps waypoint modifiers from listings and extractions", async () => {
+  const { atlas } = await import("./atlas.js");
+  const wp = (modifiers?: { symbol: string }[], traits = [{ symbol: "COMMON_METAL_DEPOSITS" }]) =>
+    ({ symbol: "ZM-SYS-AST1", systemSymbol: "ZM-SYS", type: "ENGINEERED_ASTEROID", x: 1, y: 2, traits, modifiers, orbitals: [] }) as unknown as import("../generated/types.js").Waypoint;
+  atlas.record([wp([{ symbol: "STRIPPED" }])]);
+  assert.deepEqual(atlas.get("ZM-SYS-AST1")?.modifiers, ["STRIPPED"]);
+  assert.deepEqual(atlas.summary(["ZM-SYS"])[0]?.waypoints[0]?.modifiers, ["STRIPPED"]);
+  // A trait-less record (scanned from afar) leaves known modifiers alone.
+  atlas.record([wp(undefined, [])]);
+  assert.deepEqual(atlas.get("ZM-SYS-AST1")?.modifiers, ["STRIPPED"]);
+  assert.equal(atlas.depleted("ZM-SYS-AST1"), true);
+  // An old sighting stops counting, so miners go back and look again.
+  assert.equal(atlas.depleted("ZM-SYS-AST1", Date.now() + 3 * 3600_000), false);
+  atlas.recordModifiers("ZM-SYS-AST1", []);
+  assert.equal(atlas.get("ZM-SYS-AST1")?.modifiers, undefined);
+  assert.equal(atlas.depleted("ZM-SYS-AST1"), false);
+});
+
+test("a ship docked at a shipyard gets a scrap quote when its last one is stale", () => {
+  const d = empty();
+  d.systems["X1-A"] = sys("X1-A", 0, 0, { mapped: true });
+  d.waypoints["X1-A-Y1"] = wp("X1-A-Y1", "PLANET", ["SHIPYARD"]);
+  const v = { ...view(d, {}, { "X1-A-Y1": now }), resaleSeenAt: (s: string) => (s === "S-2" ? now - MIN : undefined) };
+  const tasks = planCollection(v, [
+    { system: "X1-A", waypoint: "X1-A-Y1", inTransit: false, ship: "S-1", docked: true },
+    { system: "X1-A", waypoint: "X1-A-Y1", inTransit: false, ship: "S-2", docked: true }, // quoted a minute ago
+    { system: "X1-A", waypoint: "X1-A-Y1", inTransit: false, ship: "S-3", docked: false }, // in orbit: the API needs it docked
+  ], now);
+  assert.deepEqual(tasks.map(taskKey), ["resale:S-1"]);
+});

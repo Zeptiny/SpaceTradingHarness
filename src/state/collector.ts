@@ -5,6 +5,8 @@ import { mirror, storeKeys, type FleetState } from "./store.js";
 import { atlas, type KnownConstruction, type KnownGate, type KnownMarket, type KnownSystem, type KnownWaypoint } from "./atlas.js";
 import { prices } from "./prices.js";
 import { shipyards } from "./shipyards.js";
+import { resale, RESALE_MAX_AGE_MS } from "./resale.js";
+import { serverInfo } from "./universe.js";
 import { runtime } from "./runtime.js";
 import { mergeSystemWaypoints } from "./store.js";
 import { fetchMarket, fetchShipyard, refreshFleet } from "./refresh.js";
@@ -37,7 +39,8 @@ export type Task =
   | { kind: "gate"; waypoint: string }
   | { kind: "construction"; waypoint: string }
   | { kind: "market-list"; waypoint: string }
-  | { kind: "scout"; system: string };
+  | { kind: "scout"; system: string }
+  | { kind: "resale"; ship: string; waypoint: string };
 
 export interface PlannerView {
   system(symbol: string): KnownSystem | undefined;
@@ -47,15 +50,19 @@ export interface PlannerView {
   market(waypoint: string): KnownMarket | undefined;
   pricedAt(waypoint: string): number | undefined;
   shipyardSeenAt(waypoint: string): number | undefined;
+  /** When the ship's scrap value was last quoted. */
+  resaleSeenAt?(ship: string): number | undefined;
 }
 
 export interface ShipSpot {
   system: string;
   waypoint: string;
   inTransit: boolean;
+  ship?: string;
+  docked?: boolean;
 }
 
-export const taskKey = (t: Task): string => `${t.kind}:${"system" in t ? t.system : t.waypoint}`;
+export const taskKey = (t: Task): string => `${t.kind}:${"system" in t ? t.system : "ship" in t ? t.ship : t.waypoint}`;
 
 /** Pure: everything worth collecting now, highest priority first. */
 export function planCollection(view: PlannerView, ships: ShipSpot[], now: number): Task[] {
@@ -79,6 +86,15 @@ export function planCollection(view: PlannerView, ships: ShipSpot[], now: number
     const w = view.inSystem(systemOf(wp)).find(x => x.symbol === wp);
     if (w?.traits.includes("SHIPYARD") && stale(view.shipyardSeenAt(wp), SHIPYARD_MAX_AGE_MS)) {
       tasks.push({ kind: "shipyard", waypoint: wp });
+    }
+  }
+
+  // Scrap quotes need the ship docked at a shipyard; take them when that happens anyway.
+  for (const s of ships) {
+    if (!s.ship || !s.docked || !view.resaleSeenAt) continue;
+    const w = view.inSystem(systemOf(s.waypoint)).find(x => x.symbol === s.waypoint);
+    if (w?.traits.includes("SHIPYARD") && stale(view.resaleSeenAt(s.ship), RESALE_MAX_AGE_MS)) {
+      tasks.push({ kind: "resale", ship: s.ship, waypoint: s.waypoint });
     }
   }
 
@@ -122,6 +138,7 @@ const liveView: PlannerView = {
   market: w => atlas.market(w),
   pricedAt: w => prices.marketsSeen().get(w),
   shipyardSeenAt: w => shipyards.seenAt(w),
+  resaleSeenAt: s => resale.seenAt(s),
 };
 
 const failedAt = new Map<string, number>();
@@ -178,6 +195,11 @@ async function runTask(t: Task, spend: (need?: number) => boolean): Promise<void
       atlas.recordConstruction(data);
       return;
     }
+    case "resale": {
+      if (!spend()) return;
+      await quoteResale(t.ship, t.waypoint);
+      return;
+    }
     case "scout": {
       if (!atlas.system(t.system)) return;
       // Two reads; start only if both fit, or the first is wasted when the budget runs out.
@@ -211,13 +233,27 @@ export async function mapSystem(system: string): Promise<void> {
   await runTask({ kind: "map", system }, spend);
 }
 
-const spot = (s: Ship): ShipSpot => ({ system: s.nav.systemSymbol, waypoint: s.nav.waypointSymbol, inTransit: s.nav.status === "IN_TRANSIT" });
+const spot = (s: Ship): ShipSpot => ({
+  system: s.nav.systemSymbol,
+  waypoint: s.nav.waypointSymbol,
+  inTransit: s.nav.status === "IN_TRANSIT",
+  ship: s.symbol,
+  docked: s.nav.status === "DOCKED",
+});
+
+async function quoteResale(ship: string, waypoint: string): Promise<void> {
+  const { data } = await transport.request<{ transaction: { totalPrice: number } }>("getScrapShip", { path: { shipSymbol: ship } });
+  const frame = mirror.get<FleetState>(storeKeys.fleet)?.ships.find(s => s.symbol === ship)?.frame?.symbol ?? "";
+  resale.record({ ship, frame, value: data.transaction.totalPrice, waypoint, ts: Date.now() });
+}
 
 /** One collection pass. Returns the number of requests spent (the fleet read included). */
 export async function collectOnce(maxRequests: number): Promise<number> {
   if (runtime.wake || runtime.paused || maxRequests <= 0) return 0;
   const ships = await refreshFleet();
   let spent = 1;
+  // Keeps the reset date and the panel's leaderboard current (cached; a request at most every 15 minutes).
+  await serverInfo();
   if (!ships?.length) return spent;
   // `need` lets a multi-read task check it can finish before starting.
   const spend = (need = 1): boolean => {

@@ -11,6 +11,9 @@ export interface ShipOffer {
   type: string;
   price: number;
   supply: string;
+  /** Cargo units the stock ship holds (sum of its cargo modules). */
+  cargo?: number | undefined;
+  speed?: number | undefined;
   ts: number;
 }
 
@@ -34,6 +37,8 @@ class ShipyardMemory {
         type: s.type,
         price: s.purchasePrice,
         supply: s.supply,
+        cargo: (s.modules ?? []).filter(m => m.symbol.startsWith("MODULE_CARGO_HOLD")).reduce((n, m) => n + (m.capacity ?? 0), 0),
+        speed: s.engine?.speed,
         ts,
       };
     }

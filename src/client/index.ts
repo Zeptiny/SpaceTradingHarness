@@ -91,6 +91,8 @@ export const api = {
     }),
   repairShip: (shipSymbol: string) =>
     transport.request<T.repairShipResponse>("repairShip", { path: { shipSymbol } }),
+  chart: (shipSymbol: string) =>
+    transport.request<T.createChartResponse>("createChart", { path: { shipSymbol } }),
   scrapShip: (shipSymbol: string) =>
     transport.request<T.scrapShipResponse>("scrapShip", { path: { shipSymbol } }),
 
@@ -135,6 +137,11 @@ export const api = {
     transport.request<T.getJumpGateResponse>("getJumpGate", { path: { systemSymbol, waypointSymbol } }),
   getConstruction: (systemSymbol: string, waypointSymbol: string) =>
     transport.request<T.getConstructionResponse>("getConstruction", { path: { systemSymbol, waypointSymbol } }),
+  supplyConstruction: (systemSymbol: string, waypointSymbol: string, shipSymbol: string, tradeSymbol: string, units: number) =>
+    transport.request<T.supplyConstructionResponse>("supplyConstruction", {
+      path: { systemSymbol, waypointSymbol },
+      body: { shipSymbol, tradeSymbol, units },
+    }),
 
   // Factions & data
   listFactions: (limit = 20, page = 1) =>

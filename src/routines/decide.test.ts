@@ -135,3 +135,30 @@ test("goto: refuels first when auto-refuel is off", () => {
   const step = decideGoto({ kind: "goto", destination: "X1-AA-B2" }, ship({ fuel: { current: 50, capacity: 400 } }), world({}, { map: map(false) }));
   assert.equal(step.do, "refuel");
 });
+
+test("mine: leaves an over-mined asteroid for the nearest clear one with the same deposits", async () => {
+  const { mineSite } = await import("./decide.js");
+  const spec = { kind: "mine" as const, asteroid: "X1-AA-C3", sellAt: "X1-AA-B2" };
+  const asteroids = (depletedHome: boolean) => () => [
+    { symbol: "X1-AA-C3", deposits: ["COMMON_METAL_DEPOSITS"], depleted: depletedHome },
+    { symbol: "X1-AA-B2", deposits: ["COMMON_METAL_DEPOSITS"], depleted: false },
+    { symbol: "X1-AA-A1", deposits: ["PRECIOUS_METAL_DEPOSITS"], depleted: false }, // nearer, but other deposits
+  ];
+  assert.deepEqual(mineSite("X1-AA-C3", world({}, { asteroids: asteroids(false) })), { site: "X1-AA-C3" });
+  assert.deepEqual(mineSite("X1-AA-C3", world({}, { asteroids: asteroids(true) })), { site: "X1-AA-B2", movedFrom: "X1-AA-C3" });
+  const step = decideMine(spec, ship({ waypoint: "X1-AA-C3", status: "IN_ORBIT" }), world({}, { asteroids: asteroids(true) }));
+  assert.equal(step.do, "navigate");
+  assert.match((step as { phase: string }).phase, /moved off over-mined X1-AA-C3/);
+  const stuck = decideMine(spec, ship({ waypoint: "X1-AA-C3" }), world({}, {
+    asteroids: () => [{ symbol: "X1-AA-C3", deposits: ["COMMON_METAL_DEPOSITS"], depleted: true }],
+  }));
+  assert.equal(stuck.do, "stop");
+});
+
+test("scout: charts an uncharted waypoint it stands on and visits uncharted ones like unpriced markets", () => {
+  const spec = { kind: "scout" as const };
+  const w = world({}, { markets: () => [{ symbol: "X1-AA-B2", pricedAt: NOW }], uncharted: () => ["X1-AA-C3"] });
+  assert.equal(decideScout(spec, ship({ waypoint: "X1-AA-C3", status: "IN_ORBIT" }), w, undefined).do, "chart");
+  const go = decideScout(spec, ship(), w, undefined);
+  assert.deepEqual([go.do, go.target], ["navigate", "X1-AA-C3"]);
+});

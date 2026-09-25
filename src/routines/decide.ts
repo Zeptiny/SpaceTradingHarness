@@ -55,6 +55,16 @@ export interface World {
   /** Markets other scouts are heading to. */
   claimed: string[];
   map: MapView;
+  /** Waypoints in a system whose traits are still hidden (UNCHARTED). */
+  uncharted?: (system: string) => string[];
+  /** Minable waypoints in a system with their deposit traits and whether they were recently seen over-mined. */
+  asteroids?: (system: string) => AsteroidView[];
+}
+
+export interface AsteroidView {
+  symbol: string;
+  deposits: string[];
+  depleted: boolean;
 }
 
 export type Step =
@@ -64,6 +74,7 @@ export type Step =
   | { do: "orbit"; phase: string }
   | { do: "refuel"; phase: string }
   | { do: "read_market"; waypoint: string; phase: string }
+  | { do: "chart"; phase: string }
   | { do: "buy"; good: string; units: number; phase: string }
   | { do: "sell_all"; goods?: string[]; keep?: string[]; phase: string }
   | { do: "jettison"; good: string; units: number; phase: string }
@@ -165,6 +176,28 @@ export function holdFull(ship: ShipView): boolean {
   return free(ship) < Math.max(2, Math.ceil(ship.cargo.capacity * 0.1));
 }
 
+/**
+ * Where to mine: the assigned asteroid, unless it was recently seen over-mined
+ * (STRIPPED, CRITICAL_LIMIT, UNSTABLE); then the nearest one in the same
+ * system that shares a deposit type and isn't. Null when every candidate is
+ * over-mined. Stateless, so once the assigned asteroid's mark wears off the
+ * routine goes back and the next extraction reports its current state.
+ */
+export function mineSite(asteroid: string, w: World): { site: string; movedFrom?: string } | null {
+  const all = w.asteroids?.(systemOf(asteroid)) ?? [];
+  const home = all.find(a => a.symbol === asteroid);
+  if (!home?.depleted) return { site: asteroid };
+  const origin = w.map.point(asteroid);
+  const dist = (sym: string) => {
+    const p = w.map.point(sym);
+    return origin && p ? Math.hypot(p.x - origin.x, p.y - origin.y) : Infinity;
+  };
+  const alt = all
+    .filter(a => a.symbol !== asteroid && !a.depleted && (!home.deposits.length || a.deposits.some(d => home.deposits.includes(d))))
+    .sort((a, b) => dist(a.symbol) - dist(b.symbol))[0];
+  return alt ? { site: alt.symbol, movedFrom: asteroid } : null;
+}
+
 export function decideMine(spec: Extract<RoutineSpec, { kind: "mine" }>, ship: ShipView, w: World): Step {
   const contractGoods = spec.deliverContract ? w.contractNeeds.filter(n => n.remaining > 0) : [];
   const keepForContract = contractGoods.map(n => n.good);
@@ -193,10 +226,13 @@ export function decideMine(spec: Extract<RoutineSpec, { kind: "mine" }>, ship: S
     return { do: "sell_all", keep: keepForContract.length ? keepForContract : undefined, phase: `selling haul at ${spec.sellAt}` } as Step;
   }
 
-  const go = travelStep(ship, spec.asteroid, w.map);
-  if (go) return go;
+  const where = mineSite(spec.asteroid, w);
+  if (!where) return { do: "stop", reason: `${spec.asteroid} is over-mined and no other asteroid in ${systemOf(spec.asteroid)} with the same deposits is known to be clear` };
+  const moved = where.movedFrom ? ` (moved off over-mined ${where.movedFrom})` : "";
+  const go = travelStep(ship, where.site, w.map);
+  if (go) return go.do === "navigate" ? { ...go, phase: `${go.phase}${moved}` } : go;
   if (ship.cooldownMs > 0) return { do: "wait", ms: ship.cooldownMs + 500, phase: `extraction cooldown` };
-  return { do: "extract", phase: `mining at ${spec.asteroid} (${ship.cargo.units}/${ship.cargo.capacity})` };
+  return { do: "extract", phase: `mining at ${where.site}${moved} (${ship.cargo.units}/${ship.cargo.capacity})` };
 }
 
 /** Next market for a scout: never-priced first, then the stalest, skipping ones other scouts claimed. */
@@ -207,16 +243,20 @@ export function pickScoutTarget(ship: ShipView, candidates: { symbol: string; pr
 }
 
 export function decideScout(spec: Extract<RoutineSpec, { kind: "scout" }>, ship: ShipView, w: World, target: string | undefined): Step & { target?: string } {
-  const candidates = spec.waypoints?.length
+  const markets = spec.waypoints?.length
     ? spec.waypoints.map(symbol => w.markets(systemOf(symbol)).find(m => m.symbol === symbol) ?? { symbol, pricedAt: null })
     : w.markets(ship.system);
+  // Uncharted waypoints may hide a market or shipyard: scouts visit them too (charting reveals the traits and pays).
+  const hidden = spec.waypoints?.length ? [] : (w.uncharted?.(ship.system) ?? []);
+  const candidates = [...markets, ...hidden.filter(h => !markets.some(m => m.symbol === h)).map(symbol => ({ symbol, pricedAt: null }))];
+  if (w.uncharted?.(ship.system).includes(ship.waypoint)) return { do: "chart", phase: `charting ${ship.waypoint}`, target: ship.waypoint };
   if (target && ship.waypoint !== target) {
     const step = travelStep(ship, target, w.map);
     if (step) return { ...step, target };
   }
   if (target && ship.waypoint === target) {
-    const here = candidates.find(c => c.symbol === target);
-    if (!here?.pricedAt || w.now - here.pricedAt > QUOTE_FRESH_MS) return { do: "read_market", waypoint: target, phase: `pricing ${target}`, target };
+    const here = markets.find(c => c.symbol === target);
+    if (here && (!here.pricedAt || w.now - here.pricedAt > QUOTE_FRESH_MS)) return { do: "read_market", waypoint: target, phase: `pricing ${target}`, target };
   }
   const next = pickScoutTarget(ship, candidates, w.claimed, w.now);
   if (!next) return { do: "wait", ms: 120_000, phase: "all markets priced recently" };
