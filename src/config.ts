@@ -22,6 +22,9 @@ export const config = {
     apiKey: required("OPENAI_API_KEY"),
     model: required("LLM_MODEL"),
     timeoutMs: num("LLM_TIMEOUT_MS", 120_000),
+    // Send the model's reasoning back on its earlier assistant messages (some
+    // thinking models need it across tool calls). Set 0 if the endpoint rejects it.
+    echoReasoning: process.env.LLM_ECHO_REASONING !== "0" && process.env.LLM_ECHO_REASONING !== "false",
   },
   panelHost: process.env.PANEL_HOST ?? "127.0.0.1",
   panelPort: num("PANEL_PORT", 8787),

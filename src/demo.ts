@@ -262,7 +262,7 @@ memory.remember("Jump gate I53 is still under construction — no cross-system t
 // ---------------------------------------------------------------- wake history
 
 type Call = { tool: string; args: Record<string, unknown>; outcome?: ToolOutcome; summary: string; result?: unknown; req?: number; ms?: number; guards?: { guard: string; ok: boolean; reason?: string }[] };
-type Script = { reason: string; rounds: { thought: string; calls: Call[] }[]; summary: string; creditDelta: number };
+type Script = { reason: string; rounds: { thought: string; reasoning?: string; calls: Call[] }[]; summary: string; creditDelta: number };
 
 const scripts: Script[] = [
   {
@@ -282,7 +282,8 @@ const scripts: Script[] = [
     reason: "NYUU-4 arrival at X1-KD26-H51",
     creditDelta: 4_390,
     rounds: [
-      { thought: "NYUU-4 arrived at H51 with 52 IRON_ORE and 18 ALUMINUM_ORE. Plan: dock, deliver IRON_ORE to the contract, sell the aluminum ore, refuel, and check the market.", calls: [
+      { thought: "NYUU-4 arrived at H51 with 52 IRON_ORE and 18 ALUMINUM_ORE. Plan: dock, deliver IRON_ORE to the contract, sell the aluminum ore, refuel, and check the market.",
+        reasoning: "NYUU-4 is in orbit at H51. The contract wants IRON_ORE delivered here and we carry 52 units, which covers the remaining 52/120.\n\nAluminum ore isn't part of the contract. H51 was importing it last scan, but that price is 40 minutes old, so read the market before selling.\n\nFuel is at 180/400; refuel while docked so the return leg to F45 is safe.", calls: [
         { tool: "dock", args: { shipSymbol: "NYUU-4" }, summary: "NYUU-4 docked at X1-KD26-H51", req: 2, ms: 1210 },
         { tool: "get_market", args: { waypointSymbol: wp("H51") }, summary: "X1-KD26-H51: 6 goods with live prices", req: 1, ms: 640 },
       ] },
@@ -367,7 +368,7 @@ async function playScript(sc: Script, opts: { baseTs?: number; live: boolean }):
     runtime.wake.round = ++round;
     await step(opts.live ? rand(1800, 3200) : 4_000);
     tokens.prompt += Math.round(rand(7_000, 14_000)); tokens.completion += Math.round(rand(120, 600)); tokens.cached += 5_000;
-    activity.append({ kind: "thought", ts, wake: id, text: r.thought });
+    activity.append({ kind: "thought", ts, wake: id, text: r.thought, reasoning: r.reasoning });
     if (opts.live) bus.emit({ type: "PlanUpdated", ts, thought: r.thought, calls: r.calls.map(c => ({ tool: c.tool, args: c.args })) });
     for (const c of r.calls) {
       await step(opts.live ? (c.ms ?? 300) : (c.ms ?? 50));

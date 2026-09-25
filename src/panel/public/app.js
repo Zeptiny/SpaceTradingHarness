@@ -476,7 +476,7 @@ VIEWS.overview = {
     const nowBody = $("#nowBody");
     if (st.wake) {
       const wakeEntries = S.activity.filter(e => e.wake === st.wake.id);
-      const lastThought = [...wakeEntries].reverse().find(e => e.kind === "thought");
+      const lastThought = [...wakeEntries].reverse().find(e => e.kind === "thought" && e.text);
       const after = lastThought ? wakeEntries.filter(e => e.kind === "tool" && e.id > lastThought.id) : [];
       $("#nowAside").innerHTML = `<span class="badge b-accent">round ${st.wake.round}</span>`;
       nowBody.innerHTML = `<div class="muted" style="font-size:12px">wake #${st.wake.id} · ${esc(st.wake.reason)}</div>
@@ -609,7 +609,11 @@ VIEWS.activity = {
 };
 
 function renderEntry(e) {
-  if (e.kind === "thought") return `<div class="ev thought-ev"><span class="ev-dot"></span><div class="ev-thought"><span class="who">Agent</span>${esc(e.text)}</div></div>`;
+  if (e.kind === "thought") {
+    const open = UI.openCalls.has(e.id);
+    const reasoning = e.reasoning ? `<div class="reasoning"><div class="reasoning-head" data-act="toggle-call" data-id="${e.id}" role="button" tabindex="0" aria-expanded="${open}">${icon("chevron", "caret")} Reasoning <span class="muted">${esc(fmtInt(e.reasoning.length))} chars</span></div>${open ? `<div class="reasoning-body">${esc(e.reasoning)}</div>` : ""}</div>` : "";
+    return `<div class="ev thought-ev"><span class="ev-dot"></span><div class="ev-thought"><span class="who">Agent</span>${reasoning}${esc(e.text)}</div></div>`;
+  }
   if (e.kind === "summary") return `<div class="ev summary-ev"><span class="ev-dot"></span><div class="ev-meta"><b style="color:var(--cyan)">Wake summary</b> — ${esc(e.text)}</div></div>`;
   if (e.kind === "system") return `<div class="ev meta-ev"><span class="ev-dot"></span><div class="ev-meta ${/error|fail/i.test(e.text ?? "") ? "bad" : ""}">${esc(e.text)}</div></div>`;
   if (e.kind !== "tool") return "";

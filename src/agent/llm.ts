@@ -22,6 +22,10 @@ export interface ParsedToolCall {
 
 export interface ChatResult {
   content: string | null;
+  /** The model's native reasoning as plain text, if the endpoint returned any. */
+  reasoning: string | null;
+  /** Reasoning fields exactly as the endpoint returned them, to send back on the assistant message. */
+  reasoningFields: Record<string, unknown>;
   toolCalls: ParsedToolCall[];
   usage: { prompt: number; completion: number; cached: number };
 }
@@ -64,8 +68,11 @@ export async function chat(
     toolCalls.push({ id: tc.id ?? null, name: tc.function.name, args });
   }
   const u = completion.usage;
+  const r = extractReasoning(msg as unknown as Record<string, unknown> | undefined);
   return {
-    content: msg?.content ?? null,
+    content: r.content,
+    reasoning: r.reasoning,
+    reasoningFields: r.fields,
     toolCalls,
     usage: {
       prompt: u?.prompt_tokens ?? 0,
@@ -73,6 +80,57 @@ export async function chat(
       cached: u?.prompt_tokens_details?.cached_tokens ?? 0,
     },
   };
+}
+
+// Non-standard fields OpenAI-compatible servers use for native reasoning:
+// reasoning_content (DeepSeek, vLLM, Qwen, Kimi), reasoning (OpenRouter,
+// Ollama, newer vLLM), reasoning_details (OpenRouter, structured) and thinking.
+const REASONING_FIELDS = ["reasoning_content", "reasoning", "thinking", "reasoning_details"] as const;
+
+function detailsText(details: unknown): string {
+  if (!Array.isArray(details)) return "";
+  return details
+    .map(d => {
+      if (!d || typeof d !== "object") return "";
+      const o = d as { text?: unknown; summary?: unknown };
+      if (typeof o.text === "string") return o.text;
+      if (typeof o.summary === "string") return o.summary;
+      return ""; // encrypted blocks carry no readable text
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/**
+ * Pulls the model's reasoning out of an assistant message. Also handles
+ * servers that inline it in content as <think>…</think> (or leave only the
+ * closing tag when the template opened it), returning content without it.
+ */
+export function extractReasoning(msg: Record<string, unknown> | undefined): {
+  content: string | null;
+  reasoning: string | null;
+  fields: Record<string, unknown>;
+} {
+  const fields: Record<string, unknown> = {};
+  let reasoning = "";
+  for (const key of REASONING_FIELDS) {
+    const v = msg?.[key];
+    if (v === undefined || v === null || v === "") continue;
+    if (Array.isArray(v) && !v.length) continue;
+    fields[key] = v;
+    const text = key === "reasoning_details" ? detailsText(v) : typeof v === "string" ? v : "";
+    // Servers often return the same text under two names; keep the first.
+    if (!reasoning && text.trim()) reasoning = text.trim();
+  }
+  let content = typeof msg?.content === "string" ? msg.content : null;
+  if (content) {
+    const inline = content.match(/^\s*(?:<think>)?([\s\S]*?)<\/think>/);
+    if (inline && (content.trimStart().startsWith("<think>") || !content.includes("<think>"))) {
+      if (!reasoning && inline[1]!.trim()) reasoning = inline[1]!.trim();
+      content = content.slice(inline[0].length).trim() || null;
+    }
+  }
+  return { content, reasoning: reasoning || null, fields };
 }
 
 // Lenient fallback for models/endpoints that answer in text instead of tool_calls.
