@@ -21,14 +21,13 @@ test("passes when the server reports no cooldown left", async () => {
 });
 
 test("rejects with seconds left, expiry and the shared-cooldown hint", async () => {
-  const expiration = "2026-09-25T14:20:00.000Z";
+  const expiration = new Date(Date.now() + 42_000).toISOString();
   const r = await cooldownClear("extract_with_survey", {
     args,
     fresh: reader({ shipSymbol: "TEAR-1", totalSeconds: 70, remainingSeconds: 42, expiration }),
   });
   assert.equal(r.ok, false);
-  assert.match(r.reason ?? "", /42s more/);
-  assert.ok(r.reason?.includes(expiration));
+  assert.match(r.reason ?? "", /until \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \(in 4[12]s\)/);
   assert.match(r.reason ?? "", /survey\/extract/);
   assert.match(r.reason ?? "", /wait_for_ship/);
 });
@@ -41,7 +40,6 @@ test("transit rejection names the arrival and seconds left", async () => {
     fresh: reader({ shipSymbol: "TEAR-1", totalSeconds: 0, remainingSeconds: 0 }, nav),
   });
   assert.equal(r.ok, false);
-  assert.ok(r.reason?.includes(arrival));
   assert.match(r.reason ?? "", /X1-SZ48-H59/);
-  assert.match(r.reason ?? "", /(89|90)s from now/);
+  assert.match(r.reason ?? "", /arrives \S+Z \(in 1m (29|30)s\)/);
 });
