@@ -48,7 +48,7 @@ export async function refreshAgent(): Promise<Agent | undefined> {
 export async function refreshFleet(): Promise<Ship[] | undefined> {
   try {
     const ships = await paginate<Ship>("getMyShips", {}, 3);
-    mirror.set(storeKeys.fleet, { ships } satisfies FleetState);
+    mirror.set(storeKeys.fleet, { ships: [...ships] } satisfies FleetState);
     return ships;
   } catch (err) {
     console.error("[refresh] fleet failed:", err instanceof Error ? err.message : err);
@@ -120,11 +120,15 @@ const WAKE_SHIPYARD_FRESH_MS = 30 * 60_000;
 
 export async function scanShipLocations(ships: Ship[], maxRequests: number): Promise<{ markets: string[]; shipyards: string[] }> {
   const out = { markets: [] as string[], shipyards: [] as string[] };
-  const locations = [...new Set(ships.filter(s => s.nav.status !== "IN_TRANSIT").map(s => s.nav.waypointSymbol))];
+  // Waypoint → system is taken up front: the scan awaits between waypoints,
+  // so it must not look ships up again afterwards.
+  const locations = new Map<string, string>();
+  for (const s of ships) {
+    if (s?.nav && s.nav.status !== "IN_TRANSIT") locations.set(s.nav.waypointSymbol, s.nav.systemSymbol);
+  }
   let budget = maxRequests;
-  for (const wp of locations) {
+  for (const [wp, system] of locations) {
     if (budget <= 0) break;
-    const system = ships.find(s => s.nav.waypointSymbol === wp)!.nav.systemSymbol;
     try {
       let known = atlas.get(wp);
       if (!known) {

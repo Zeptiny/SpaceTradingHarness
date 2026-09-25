@@ -13,7 +13,7 @@ import { getTool, toolSpecs } from "../tools/registry.js";
 import { executeTool, type ExecOutcome } from "../tools/executor.js";
 import { scheduler, type Wakeup } from "./scheduler.js";
 import { chat, extractJson, isRetryableLlmError, type ChatMessage } from "./llm.js";
-import { compactShip, contractSummary, fleetTable, isContractOpen, shipWear, WEAR_ALERT_BELOW } from "../state/projections.js";
+import { compactShip, contractSummary, fleetTable, isContractOpen, isUsableShip, shipWear, WEAR_ALERT_BELOW } from "../state/projections.js";
 import { compactSurvey, surveys } from "../state/surveys.js";
 import { shipyards } from "../state/shipyards.js";
 import { creditHistory } from "../state/credits.js";
@@ -109,8 +109,12 @@ interface WorkingMemory {
 }
 
 async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
-  const [agent, ships, contracts, server] = await Promise.all([refreshAgent(), refreshFleet(), refreshContracts(), serverInfo()]);
+  const [agent, fleet, contracts, server] = await Promise.all([refreshAgent(), refreshFleet(), refreshContracts(), serverInfo()]);
   const alerts: string[] = [];
+  // One malformed ship record must not cost the whole wake its working memory.
+  const ships = fleet?.filter(isUsableShip);
+  const broken = (fleet ?? []).filter(s => !isUsableShip(s)).map(s => (s as Ship | undefined)?.symbol ?? "?");
+  if (broken.length) alerts.push(`incomplete ship data for ${broken.join(", ")} — left out of this memory; get_ship reads it fresh`);
   // A ship in a system the harness hasn't mapped yet: map it before the agent
   // reasons about it (a partial map once made a model decide it had no gate).
   for (const system of new Set((ships ?? []).map(s => s.nav.systemSymbol))) {
@@ -129,9 +133,13 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
 
   // Harness-side collection before the agent thinks: price every market a
   // ship is sitting at and log the balance for the income trend.
+  const noScan = { markets: [] as string[], shipyards: [] as string[] };
   const scan = ships && config.agent.autoScanRequests > 0
-    ? await scanShipLocations(ships, config.agent.autoScanRequests)
-    : { markets: [], shipyards: [] };
+    ? await scanShipLocations(ships, config.agent.autoScanRequests).catch(err => {
+        console.warn("[loop] wake-start scan failed:", err instanceof Error ? err.message : err);
+        return noScan;
+      })
+    : noScan;
   if (agent && ships) ledger.sample(agent.credits, ships.length);
 
   const now = isoSec(Date.now());

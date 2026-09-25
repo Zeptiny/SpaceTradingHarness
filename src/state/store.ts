@@ -79,12 +79,15 @@ export function observeAgent(agent: Agent | undefined): void {
   creditHistory.record(agent.credits);
 }
 
+// Writes a new array instead of editing the stored one: refreshFleet hands the
+// same ships to the agent, and routines upsert while a wake is still reading
+// them (an in-place swap once moved a ship out from under the wake-start scan).
 export function upsertShip(ship: Ship): void {
-  const fleet = mirror.get<FleetState>(storeKeys.fleet) ?? { ships: [] };
-  const idx = fleet.ships.findIndex(s => s.symbol === ship.symbol);
-  if (idx >= 0) fleet.ships[idx] = ship;
-  else fleet.ships.push(ship);
-  mirror.set(storeKeys.fleet, fleet);
+  const ships = [...(mirror.get<FleetState>(storeKeys.fleet)?.ships ?? [])];
+  const idx = ships.findIndex(s => s.symbol === ship.symbol);
+  if (idx >= 0) ships[idx] = ship;
+  else ships.push(ship);
+  mirror.set(storeKeys.fleet, { ships });
 }
 
 export function removeShip(symbol: string): void {
