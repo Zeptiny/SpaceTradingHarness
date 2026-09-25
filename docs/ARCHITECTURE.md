@@ -104,7 +104,7 @@ const cooldownClear:   Guard
 | `create_survey` | `POST .../survey` | in orbit, surveyor mount, cooldown clear |
 | `buy_cargo` | `POST .../purchase` | docked at marketplace, sells good, trade volume, cargo space, credits |
 | `sell_cargo` | `POST .../sell` | docked at marketplace, buys good, cargo present |
-| `transfer_cargo` | `POST .../transfer` | ships co-located, space in target |
+| `transfer_cargo` | `POST .../transfer` | ships co-located, neither in transit, space in target; sender auto-docks/orbits to match receiver |
 | `jettison` | `POST .../jettison` | in orbit, cargo present |
 | `refine` | `POST .../refine` | docked, refinery module, raw materials present |
 | `accept_contract` | `POST /my/contracts/{id}/accept` | contract offered, not expired |

@@ -37,15 +37,12 @@ export const api = {
     transport.request<T.jumpShipResponse>("jumpShip", { path: { shipSymbol }, body: { waypointSymbol } }),
 
   // Fleet — resources
-  extract: (shipSymbol: string, survey?: T.Survey) =>
-    transport.request<T.extractResourcesResponse>("extractResources", {
-      path: { shipSymbol },
-      body: survey ? { survey } : {},
-    }),
+  extract: (shipSymbol: string) =>
+    transport.request<T.extractResourcesResponse>("extractResources", { path: { shipSymbol } }),
   extractWithSurvey: (shipSymbol: string, survey: T.Survey) =>
     transport.request<T.extractResourcesWithSurveyResponse>("extractResourcesWithSurvey", {
       path: { shipSymbol },
-      body: { survey },
+      body: survey,
     }),
   siphon: (shipSymbol: string) =>
     transport.request<T.siphonResourcesResponse>("siphonResources", { path: { shipSymbol } }),
@@ -64,10 +61,10 @@ export const api = {
   transferCargo: (shipSymbol: string, tradeSymbol: string, units: number, receiveShipSymbol: string) =>
     transport.request<T.transferCargoResponse>("transferCargo", {
       path: { shipSymbol },
-      body: { tradeSymbol, units, receiveShipSymbol },
+      body: { tradeSymbol, units, shipSymbol: receiveShipSymbol },
     }),
   shipRefine: (shipSymbol: string, produceSymbol: string) =>
-    transport.request<T.shipRefineResponse>("shipRefine", { path: { shipSymbol }, body: { produceSymbol } }),
+    transport.request<T.shipRefineResponse>("shipRefine", { path: { shipSymbol }, body: { produce: produceSymbol } }),
 
   // Fleet — shipyard ops
   purchaseShip: (shipType: string, waypointSymbol: string) =>
@@ -75,22 +72,22 @@ export const api = {
   installModule: (shipSymbol: string, moduleSymbol: string) =>
     transport.request<T.installShipModuleResponse>("installShipModule", {
       path: { shipSymbol },
-      body: { moduleSymbol },
+      body: { symbol: moduleSymbol },
     }),
   removeModule: (shipSymbol: string, moduleSymbol: string) =>
     transport.request<T.removeShipModuleResponse>("removeShipModule", {
       path: { shipSymbol },
-      body: { moduleSymbol },
+      body: { symbol: moduleSymbol },
     }),
   installMount: (shipSymbol: string, mountSymbol: string) =>
     transport.request<T.installMountResponse>("installMount", {
       path: { shipSymbol },
-      body: { mountSymbol },
+      body: { symbol: mountSymbol },
     }),
   removeMount: (shipSymbol: string, mountSymbol: string) =>
     transport.request<T.removeMountResponse>("removeMount", {
       path: { shipSymbol },
-      body: { mountSymbol },
+      body: { symbol: mountSymbol },
     }),
   repairShip: (shipSymbol: string) =>
     transport.request<T.repairShipResponse>("repairShip", { path: { shipSymbol } }),

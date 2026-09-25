@@ -141,6 +141,32 @@ export const cargoHasGood: Guard = async (_name, ctx) => {
   return { ok: true };
 };
 
+// transfer_cargo: the receiving ship must be a different ship at the same
+// waypoint, not in transit, with room for the units. Matching nav state
+// (both docked or both in orbit) is handled by the tool, not rejected here.
+export const transferTargetReady: Guard = async (_name, ctx) => {
+  const r = await requireShip(ctx);
+  if ("error" in r) return r.error;
+  const target = ctx.args["receiveShipSymbol"];
+  if (typeof target !== "string") return { ok: false, reason: "missing receiveShipSymbol arg" };
+  if (target === r.symbol) return { ok: false, reason: "cannot transfer cargo to the same ship" };
+  const recv = await ctx.fresh.ship(target);
+  if (!recv) return { ok: false, reason: `unknown receiving ship ${target}` };
+  for (const [sym, s] of [[r.symbol, r.ship], [target, recv]] as const) {
+    if (s.nav.status === "IN_TRANSIT") {
+      const arrival = s.nav.route?.arrival ? new Date(s.nav.route.arrival).toISOString() : "unknown";
+      return { ok: false, reason: `${sym} in transit until ${arrival}` };
+    }
+  }
+  if (recv.nav.waypointSymbol !== r.ship.nav.waypointSymbol) {
+    return { ok: false, reason: `${target} is at ${recv.nav.waypointSymbol}, ${r.symbol} is at ${r.ship.nav.waypointSymbol}; both must be at the same waypoint` };
+  }
+  const units = Number(ctx.args["units"] ?? 0);
+  const free = recv.cargo.capacity - recv.cargo.units;
+  if (units > free) return { ok: false, reason: `${target} has only ${free} cargo space free, need ${units}` };
+  return { ok: true };
+};
+
 export const waypointHasTrait = (trait: string): Guard => named(`waypointHasTrait(${trait})`, async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;

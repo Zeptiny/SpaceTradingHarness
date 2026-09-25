@@ -5,7 +5,7 @@ import { compactCargo } from "../state/projections.js";
 import { registerTool } from "./registry.js";
 import {
   cargoHasGood, cooldownClear, inOrbit, isDocked, knownShip,
-  notInTransit, shipHasModule, shipHasMount, waypointHasTrait,
+  notInTransit, shipHasModule, shipHasMount, transferTargetReady, waypointHasTrait,
 } from "../guards/index.js";
 import { cooldownNote, cooldownWakeAt } from "../utils/time.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
@@ -113,7 +113,7 @@ function surveySchema() {
 
 registerTool({
   name: "transfer_cargo",
-  description: "Transfer cargo between two co-located ships (both at the same waypoint).",
+  description: "Transfer cargo from shipSymbol to receiveShipSymbol. Both ships must be at the same waypoint; the sending ship auto-docks or auto-orbits to match the receiver.",
   kind: "action",
   input: z.object({
     shipSymbol: z.string(),
@@ -121,12 +121,18 @@ registerTool({
     units: z.number().int().positive(),
     receiveShipSymbol: z.string(),
   }),
-  guards: [knownShip, cargoHasGood],
+  guards: [knownShip, cargoHasGood, transferTargetReady],
   rateCost: 2,
   handler: async ({ shipSymbol, tradeSymbol, units, receiveShipSymbol }, ctx) => {
-    const { data } = await api.transferCargo(shipSymbol, tradeSymbol, units, receiveShipSymbol);
+    // The API needs both ships in the same nav state. Only the sender is under
+    // this call's ship lock, so move the sender to match the receiver.
     const ship = await ctx.fresh.ship(shipSymbol);
+    const recv = await ctx.fresh.ship(receiveShipSymbol);
+    if (recv?.nav.status === "DOCKED") await ensureDocked(shipSymbol, ship);
+    else if (recv?.nav.status === "IN_ORBIT") await ensureOrbit(shipSymbol, ship);
+    const { data } = await api.transferCargo(shipSymbol, tradeSymbol, units, receiveShipSymbol);
     if (ship) upsertShip({ ...ship, cargo: data.cargo });
+    if (recv) upsertShip({ ...recv, cargo: data.targetCargo });
     return { summary: `${shipSymbol} → ${receiveShipSymbol}: ${units}x ${tradeSymbol}`, result: { cargo: compactCargo(data.cargo) } };
   },
 });
