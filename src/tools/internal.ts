@@ -11,10 +11,10 @@ import type { Ship } from "../generated/types.js";
 
 registerTool({
   name: "end_loop",
-  description: "Finish this wake. Always include summary: 1–2 plain sentences for the human operator — what you did this wake and what you are waiting on. Optionally pass wakeInSeconds (or wakeAt, a UTC ISO timestamp) to schedule the next wake (ship arrivals and cooldowns are auto-scheduled from tool results regardless; without wakeAt a periodic fallback wake covers you). Other calls in the same batch still run. Call it as soon as there is nothing more worth doing this wake.",
+  description: "Finish this wake. Always include summary (at most 2000 characters): a few plain sentences for the human operator — what you did this wake and what you are waiting on. Optionally pass wakeInSeconds (or wakeAt, a UTC ISO timestamp) to schedule the next wake (ship arrivals and cooldowns are auto-scheduled from tool results regardless; without wakeAt a periodic fallback wake covers you). Other calls in the same batch still run. Call it as soon as there is nothing more worth doing this wake.",
   kind: "internal",
   input: z.object({
-    summary: z.string().max(600).optional(),
+    summary: z.string().max(2000).optional(),
     wakeInSeconds: z.number().positive().optional(),
     wakeAt: z.string().optional(),
     reason: z.string().optional(),
