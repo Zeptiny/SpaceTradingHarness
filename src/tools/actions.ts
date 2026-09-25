@@ -8,7 +8,7 @@ import {
 } from "../guards/index.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
 import { config } from "../config.js";
-import { cooldownNote, cooldownWakeAt, etaWakeAt } from "../utils/time.js";
+import { cooldownNote, cooldownWakeAt, etaWakeAt, stamp } from "../utils/time.js";
 import { compactCargo, compactShip } from "../state/projections.js";
 import { ledger } from "../state/ledger.js";
 import { ShipTypeValues, type ShipNavFlightMode } from "../generated/types.js";
@@ -63,7 +63,7 @@ registerTool({
     const { data } = await api.navigate(shipSymbol, waypointSymbol);
     if (ship) upsertShip({ ...ship, nav: data.nav, fuel: data.fuel });
     return {
-      summary: `${shipSymbol} in transit to ${waypointSymbol} (${flightMode ?? "CRUISE"}), fuel ${data.fuel.current}/${data.fuel.capacity}`,
+      summary: `${shipSymbol} in transit to ${waypointSymbol} (${flightMode ?? "CRUISE"}), arrives ${stamp(data.nav.route?.arrival)}, fuel ${data.fuel.current}/${data.fuel.capacity}`,
       result: { nav: data.nav, fuel: data.fuel },
       followUpWakeAt: etaWakeAt(data.nav),
       followUpReason: `${shipSymbol} arrival at ${waypointSymbol}`,

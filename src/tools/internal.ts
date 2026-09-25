@@ -2,26 +2,27 @@ import { z } from "zod";
 import { registerTool } from "./registry.js";
 import { memory } from "../state/memory.js";
 import { prices } from "../state/prices.js";
-import { clampWakeAt, secondsUntil } from "../utils/time.js";
+import { clampWakeAt, secondsUntil, stamp } from "../utils/time.js";
 import { systemOf } from "../utils/symbols.js";
 import { distance, fuelCost } from "../utils/nav.js";
 
 registerTool({
   name: "end_loop",
-  description: "Finish this wake. Always include summary: 1–2 plain sentences for the human operator — what you did this wake and what you are waiting on. Optionally pass wakeAt (ISO timestamp) to schedule the next wake (ship arrivals and cooldowns are auto-scheduled from tool results regardless; without wakeAt a periodic fallback wake covers you). Other calls in the same batch still run. Call it as soon as there is nothing more worth doing this wake.",
+  description: "Finish this wake. Always include summary: 1–2 plain sentences for the human operator — what you did this wake and what you are waiting on. Optionally pass wakeInSeconds (or wakeAt, a UTC ISO timestamp) to schedule the next wake (ship arrivals and cooldowns are auto-scheduled from tool results regardless; without wakeAt a periodic fallback wake covers you). Other calls in the same batch still run. Call it as soon as there is nothing more worth doing this wake.",
   kind: "internal",
   input: z.object({
     summary: z.string().max(600).optional(),
+    wakeInSeconds: z.number().positive().optional(),
     wakeAt: z.string().optional(),
     reason: z.string().optional(),
   }),
   rateCost: 0,
-  handler: async ({ wakeAt, reason }) => {
-    if (wakeAt !== undefined) {
-      const t = Date.parse(wakeAt);
+  handler: async ({ wakeInSeconds, wakeAt, reason }) => {
+    if (wakeInSeconds !== undefined || wakeAt !== undefined) {
+      const t = wakeInSeconds !== undefined ? Date.now() + wakeInSeconds * 1000 : Date.parse(wakeAt!);
       const at = Number.isFinite(t) ? clampWakeAt(t) : clampWakeAt(Date.now() + 60_000);
       return {
-        summary: `loop finished; next wake ${new Date(at).toISOString()}${reason ? ` (${reason})` : ""}`,
+        summary: `loop finished; next wake ${stamp(at)}${reason ? ` (${reason})` : ""}`,
         result: { ended: true, nextWakeAt: new Date(at).toISOString() },
         followUpWakeAt: at,
         followUpReason: reason ?? "agent-scheduled wake",
@@ -116,11 +117,11 @@ registerTool({
     if (!s) return { summary: `unknown ship ${ship}`, result: { ready: false } };
     const arrival = s.nav.status === "IN_TRANSIT" ? s.nav.route.arrival : undefined;
     const readyInS = Math.max(secondsUntil(arrival), secondsUntil(s.cooldown.expiration), s.cooldown.remainingSeconds);
-    const readyAt = new Date(Date.now() + readyInS * 1000).toISOString();
+    const readyAt = stamp(Date.now() + readyInS * 1000);
     if (readyInS === 0) return { summary: `${ship} is ready now`, result: { ready: true, waitedSeconds: 0 } };
     if (readyInS > MAX_WAIT_S) {
       return {
-        summary: `${ship} ready in ${readyInS}s (${readyAt}), too long to wait in this wake; work other ships or end_loop, the harness auto-wakes it`,
+        summary: `${ship} ready ${readyAt}, too long to wait in this wake; work other ships or end_loop, the harness auto-wakes it`,
         result: { ready: false, readyInSeconds: readyInS, readyAt },
       };
     }

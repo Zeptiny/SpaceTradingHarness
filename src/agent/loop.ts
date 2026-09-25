@@ -17,6 +17,7 @@ import { compactShip, contractSummary, isContractOpen } from "../state/projectio
 import { shipyards } from "../state/shipyards.js";
 import { creditHistory } from "../state/credits.js";
 import type { WakeStats } from "../state/summaries.js";
+import { annotateTimes, isoSec, stamp } from "../utils/time.js";
 import type { Agent, Ship } from "../generated/types.js";
 
 const SYSTEM_PROMPT = `You are the decision core of a SpaceTraders agent. You control a fleet of ships via tools. You are fully autonomous — no human will approve or intervene.
@@ -26,9 +27,10 @@ Mission: grow the fleet and the income rate as fast as possible. Net worth (ship
 How you work:
 - Reason freely in your reply text. Act by calling tools — batch as many as you like per turn; the harness executes them with bounded concurrency and rate-limits the API for you. Results come back each round and you think again.
 - This conversation is your working memory for the whole wake: every tool call and result stays in context. Before re-fetching data, check what you already have — identical repeat reads are answered from cache without hitting the API.
-- You decide when the wake ends: call end_loop when there is nothing more worth doing — optionally with wakeAt (ISO) to choose the next wake time. Ship arrivals and cooldowns are auto-scheduled from tool results regardless.
+- You decide when the wake ends: call end_loop when there is nothing more worth doing — optionally with wakeInSeconds to choose the next wake time. Ship arrivals and cooldowns are auto-scheduled from tool results regardless.
 - Guards fail locally before any action request is sent — read the reason and adapt (fetch market/waypoint data, refuel, move a ship to the shipyard). Guards read live server state: a rejection is never stale cache or clock skew.
-- Every tool result carries now (current time). A ship IN_TRANSIT or on cooldown cannot act until the time its rejection names; don't retry before then. Use wait_for_ship for short waits, otherwise give other ships work or end_loop.
+- Time: every timestamp is UTC ISO-8601, and each one comes with a relative value ("in 42s", "3m 05s ago"): in text as "2026-09-25T15:08:40Z (in 42s)", in JSON as a sibling "<field>Rel" (arrival → arrivalRel). Relative values are computed at the "now" of the message they appear in; the latest tool result's "now" is the current time. Working memory's builtAt is the wake start and goes stale. Read the relative values instead of subtracting timestamps yourself.
+- A ship IN_TRANSIT or on cooldown cannot act until the time its rejection names; don't retry before then. Use wait_for_ship for short waits, otherwise give other ships work or end_loop.
 - Identical reads within a wake are answered from cache for up to 30s, until you take an action or wait; after that, reads hit the API again.
 - When you finish, call end_loop with a short summary for the human operator.
 
@@ -54,7 +56,7 @@ Rules:
 - Trade, refuel, deliver and negotiate auto-dock; navigate, extract, siphon and survey auto-orbit — no separate dock/orbit call needed.`;
 
 interface WorkingMemory {
-  time: string;
+  builtAt: string;
   reason: string;
   directive: string | null;
   policy: string;
@@ -99,10 +101,10 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     : { markets: [], shipyards: [] };
   if (agent && ships) ledger.sample(agent.credits, ships.length);
 
-  const now = new Date().toISOString();
+  const now = isoSec(Date.now());
   const shipState = (s: Ship): string => {
-    if (s.nav.status === "IN_TRANSIT") return `IN_TRANSIT to ${s.nav.route.destination.symbol} until ${s.nav.route.arrival}`;
-    if (s.cooldown.remainingSeconds > 0) return `COOLDOWN ${s.cooldown.remainingSeconds}s`;
+    if (s.nav.status === "IN_TRANSIT") return `IN_TRANSIT to ${s.nav.route.destination.symbol}, arrives ${stamp(s.nav.route.arrival)}`;
+    if (s.cooldown.remainingSeconds > 0) return `COOLDOWN until ${stamp(s.cooldown.expiration ?? Date.now() + s.cooldown.remainingSeconds * 1000)}`;
     return `IDLE (${s.nav.status} at ${s.nav.waypointSymbol})`;
   };
   const idleShips = (ships ?? []).filter(s => shipState(s).startsWith("IDLE")).map(s => s.symbol);
@@ -160,7 +162,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   for (const c of openContracts) {
     if (c.accepted) {
       const remaining = (c.terms.deliver ?? []).filter(d => d.unitsFulfilled < d.unitsRequired).length;
-      const dueSoon = Date.parse(c.terms.deadline) < Date.now() + 24 * 3600_000 ? `, due ${c.terms.deadline}` : "";
+      const dueSoon = Date.parse(c.terms.deadline) < Date.now() + 24 * 3600_000 ? `, due ${stamp(c.terms.deadline)}` : "";
       alerts.push(`contract ${c.id.slice(0, 8)} accepted, ${remaining} deliverable(s) unfinished${dueSoon}`);
     } else if (c.deadlineToAccept && Date.parse(c.deadlineToAccept) < Date.now() + 24 * 3600_000) {
       alerts.push(`contract ${c.id.slice(0, 8)} offer expires soon`);
@@ -168,7 +170,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   }
 
   const wm: WorkingMemory = {
-    time: now,
+    builtAt: now,
     reason,
     directive: scheduler.directive,
     policy: config.agent.policy,
@@ -211,7 +213,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     },
     alerts,
   };
-  return wm;
+  return annotateTimes(wm);
 }
 
 interface PlannedCall {
@@ -303,9 +305,10 @@ function stableKey(v: unknown): string {
 function toolMessageFor(callId: string, o: ExecOutcome): ChatMessage {
   // `now` gives the agent a clock: working memory's timestamp is only the
   // wake start, and arrivals/cooldowns are absolute server times.
-  const now = new Date().toISOString();
+  const nowMs = Date.now();
+  const now = isoSec(nowMs);
   const payload = o.outcome === "ok"
-    ? { now, summary: o.summary, result: o.result ?? null }
+    ? { now, summary: o.summary, result: annotateTimes(o.result ?? null, nowMs) }
     : { now, outcome: o.outcome, summary: o.summary };
   let content = JSON.stringify(payload);
   if (content.length > MAX_TOOL_RESULT_CHARS) {
