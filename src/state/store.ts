@@ -1,5 +1,6 @@
 import { bus } from "../events/bus.js";
-import type { Ship, Waypoint } from "../generated/types.js";
+import { creditHistory } from "./credits.js";
+import type { Agent, Contract, Ship, Waypoint } from "../generated/types.js";
 
 interface Entry {
   value: unknown;
@@ -67,9 +68,16 @@ export const storeKeys = {
   systemWaypoints: (s: string) => `system-waypoints:${s}`,
   waypoint: (s: string, w: string) => `waypoint:${s}:${w}`,
   market: (s: string, w: string) => `market:${s}:${w}`,
+  shipyard: (s: string, w: string) => `shipyard:${s}:${w}`,
 } as const;
 
 // ---- Mirror write helpers (single write path per key) ----
+
+export function observeAgent(agent: Agent | undefined): void {
+  if (!agent) return;
+  mirror.set(storeKeys.agent, agent);
+  creditHistory.record(agent.credits);
+}
 
 export function upsertShip(ship: Ship): void {
   const fleet = mirror.get<FleetState>(storeKeys.fleet) ?? { ships: [] };
@@ -77,6 +85,20 @@ export function upsertShip(ship: Ship): void {
   if (idx >= 0) fleet.ships[idx] = ship;
   else fleet.ships.push(ship);
   mirror.set(storeKeys.fleet, fleet);
+}
+
+export function removeShip(symbol: string): void {
+  const fleet = mirror.get<FleetState>(storeKeys.fleet);
+  if (!fleet) return;
+  mirror.set(storeKeys.fleet, { ships: fleet.ships.filter(s => s.symbol !== symbol) });
+}
+
+export function upsertContract(contract: Contract): void {
+  const contracts = [...(mirror.get<Contract[]>(storeKeys.contracts) ?? [])];
+  const idx = contracts.findIndex(c => c.id === contract.id);
+  if (idx >= 0) contracts[idx] = contract;
+  else contracts.push(contract);
+  mirror.set(storeKeys.contracts, contracts);
 }
 
 export function mergeSystemWaypoints(system: string, incoming: Waypoint[]): Waypoint[] {

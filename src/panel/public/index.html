@@ -3,516 +3,65 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>SpaceTradingHarness</title>
-<style>
-  :root {
-    --bg: #0b0e14; --panel: #131824; --card: #1a2130; --line: #232c3f;
-    --text: #dbe2f0; --dim: #8a94ab; --accent: #5eead4; --warn: #fbbf24; --bad: #f87171; --ok: #4ade80;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.5 ui-monospace, "JetBrains Mono", monospace; }
-  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10; }
-  header h1 { font-size: 14px; margin: 0; color: var(--accent); }
-  .spacer { flex: 1; }
-  #conn { font-size: 11px; }
-  .live { color: var(--ok); } .stale { color: var(--bad); }
-  .gauge { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
-  .gauge .bar { width: 80px; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
-  .gauge .fill { height: 100%; background: var(--accent); }
-  main { display: flex; min-height: calc(100vh - 45px); }
-  nav { width: 140px; padding: 12px 8px; border-right: 1px solid var(--line); }
-  nav button { display: block; width: 100%; text-align: left; padding: 7px 10px; margin-bottom: 2px; background: none; color: var(--dim); border: none; border-radius: 6px; cursor: pointer; font: inherit; }
-  nav button:hover { background: var(--card); color: var(--text); }
-  nav button.active { background: var(--card); color: var(--accent); }
-  section { flex: 1; padding: 16px; overflow-y: auto; max-width: 1100px; }
-  h2 { font-size: 13px; color: var(--dim); text-transform: uppercase; letter-spacing: 1px; margin: 18px 0 8px; }
-  h2:first-child { margin-top: 0; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
-  .kv { display: flex; justify-content: space-between; padding: 2px 0; }
-  .kv .k { color: var(--dim); }
-  .badge { padding: 1px 7px; border-radius: 10px; font-size: 10px; }
-  .b-DOCKED { background: #164e63; color: #67e8f9; }
-  .b-IN_ORBIT { background: #1e3a8a; color: #93c5fd; }
-  .b-IN_TRANSIT { background: #4c1d95; color: #c4b5fd; }
-  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; margin: 3px 0; }
-  .bar i { display: block; height: 100%; background: var(--accent); }
-  .bar i.warn { background: var(--warn); }
-  .bar i.bad { background: var(--bad); }
-  .feed { display: flex; flex-direction: column; gap: 4px; }
-  .entry { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font-size: 12px; }
-  .entry .meta { color: var(--dim); font-size: 11px; }
-  .entry .oc-ok { color: var(--ok); } .entry .oc-error, .entry .oc-rejected, .entry .oc-blocked { color: var(--bad); } .entry .oc-pending { color: var(--warn); }
-  .entry.details { cursor: pointer; }
-  .entry pre { margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; color: var(--dim); font-size: 11px; }
-  .btn { background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer; font: inherit; }
-  .btn:hover { border-color: var(--accent); color: var(--accent); }
-  .btn.warn { border-color: var(--warn); color: var(--warn); }
-  .btn.ok { border-color: var(--ok); color: var(--ok); }
-  input[type=text], select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; font: inherit; }
-  input.wide { width: 320px; }
-  .row { display: flex; gap: 8px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
-  .plan { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 6px; padding: 10px 12px; }
-  .plan .call { color: var(--dim); font-size: 12px; }
-  .goal { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
-  .dim { color: var(--dim); }
-  .hidden { display: none; }
-  table { border-collapse: collapse; width: 100%; font-size: 12px; }
-  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); }
-  th { color: var(--dim); font-weight: normal; text-transform: uppercase; font-size: 10px; letter-spacing: 1px; }
-  .mapwrap { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
-  .wp:hover circle { stroke: var(--accent); }
-  .spark { display: inline-block; }
-  .deadline.soon { color: var(--warn); } .deadline.over { color: var(--bad); }
-</style>
+<title>Flight Deck · SpaceTradingHarness</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%23f7a531' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='4.5' fill='%23f7a531'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header>
-  <h1>⚙ SpaceTradingHarness</h1>
-  <span id="conn" class="stale">connecting…</span>
-  <div class="spacer"></div>
-  <div class="gauge">rate <div class="bar"><div class="fill" id="rateFill"></div></div> <span id="rateText">–</span></div>
-  <span id="paused" class="badge b-IN_TRANSIT hidden">PAUSED</span>
-</header>
-<main>
-  <nav>
-    <button data-tab="dashboard" class="active">Dashboard</button>
-    <button data-tab="fleet">Fleet</button>
-    <button data-tab="map">Map</button>
-    <button data-tab="markets">Markets</button>
-    <button data-tab="contracts">Contracts</button>
-    <button data-tab="activity">Activity</button>
-    <button data-tab="summaries">Summaries</button>
-    <button data-tab="agent">Agent</button>
-    <button data-tab="memory">Memory</button>
-    <button data-tab="settings">Settings</button>
-  </nav>
-  <section id="tab-dashboard">
-    <div class="cards" id="dashCards"></div>
-    <h2>Current plan</h2>
-    <div id="planBox" class="plan">no plan yet</div>
-    <h2>Recent loop summaries</h2>
-    <div id="dashSummaries" class="feed"></div>
-  </section>
-  <section id="tab-fleet" class="hidden">
-    <div class="cards" id="fleetCards"></div>
-  </section>
-  <section id="tab-map" class="hidden">
-    <div class="row">
-      <span class="dim">system</span>
-      <select id="systemSelect" class="btn"></select>
-      <span class="dim" id="mapHint">waypoints plot by x/y; ◮ = ships present</span>
+<div class="app">
+  <aside class="rail">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13"/><circle cx="16" cy="16" r="4.5"/><path d="M16 1v5M16 26v5M1 16h5M26 16h5"/></svg>
+      <div>
+        <div class="brand-name">Flight Deck</div>
+        <div class="brand-sub" id="agentIdent">SpaceTradingHarness</div>
+      </div>
     </div>
-    <div class="mapwrap" id="mapBox"></div>
-    <h2>In transit</h2>
-    <div id="transitFeed" class="feed"></div>
-  </section>
-  <section id="tab-markets" class="hidden">
-    <div class="row">
-      <input type="text" id="goodFilter" placeholder="filter by good (e.g. FUEL, IRON_ORE)…">
-      <span class="dim">harness-local price history (API has none)</span>
+    <nav class="nav" id="nav" aria-label="Views"></nav>
+    <div class="rail-foot">
+      <div class="link" id="link"><span class="link-dot"></span><span id="linkText">connecting…</span></div>
+      <div class="rail-meta" id="railMeta"></div>
     </div>
-    <div id="marketsTable"></div>
-  </section>
-  <section id="tab-contracts" class="hidden">
-    <div id="contractsBoard"></div>
-  </section>
-  <section id="tab-activity" class="hidden">
-    <div class="row">
-      <input type="text" id="actFilter" placeholder="filter by tool name…">
-      <select id="actOutcome" class="btn">
-        <option value="">all outcomes</option>
-        <option>ok</option><option>guard-rejected</option><option>api-error</option>
-        <option>blocked-by-policy</option><option>local-error</option><option>unknown-tool</option>
-      </select>
-    </div>
-    <div id="activityFeed" class="feed"></div>
-  </section>
-  <section id="tab-summaries" class="hidden">
-    <div id="summariesFeed" class="feed"></div>
-  </section>
-  <section id="tab-agent" class="hidden">
-    <h2>Control</h2>
-    <div class="row">
-      <button class="btn warn" id="btnPause">Pause</button>
-      <button class="btn ok" id="btnResume">Resume</button>
-      <button class="btn" id="btnWake">Wake now</button>
-      <span class="dim">fully autonomous — no approvals needed</span>
-    </div>
-    <h2>Directive (injected into next wake)</h2>
-    <div class="row">
-      <input type="text" id="directiveInput" class="wide" placeholder="e.g. prioritize refueling before trading">
-      <button class="btn" id="btnDirective">Set</button>
-    </div>
-    <h2>Scheduled wakeups</h2>
-    <div id="wakeups" class="feed"></div>
-    <h2>Registered tools</h2>
-    <div id="toolList" class="feed"></div>
-  </section>
-  <section id="tab-memory" class="hidden">
-    <h2>Goals</h2>
-    <div class="row">
-      <input type="text" id="goalInput" class="wide" placeholder="new goal description…">
-      <button class="btn" id="btnGoal">Add goal</button>
-    </div>
-    <div id="goals" class="feed"></div>
-    <h2>Notes (what the agent remembers)</h2>
-    <div id="notes" class="feed"></div>
-  </section>
-  <section id="tab-settings" class="hidden">
-    <div class="cards" id="settingsCards"></div>
-  </section>
-</main>
-<script>
-const $ = (s) => document.querySelector(s);
-const state = { state: null, activity: [], universe: null, marketHistory: [], tools: null };
-const NAV_STATUSES = ["DOCKED", "IN_ORBIT", "IN_TRANSIT"];
+  </aside>
 
-document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
-  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x === b));
-  document.querySelectorAll("main section").forEach(s => s.classList.add("hidden"));
-  $("#tab-" + b.dataset.tab).classList.remove("hidden");
-  if (b.dataset.tab === "map") loadUniverse();
-  if (b.dataset.tab === "contracts") renderContracts(state.state?.contracts ?? []);
-  if (b.dataset.tab === "activity") loadActivity();
-  if (b.dataset.tab === "memory") loadMemory();
-  if (b.dataset.tab === "markets") loadMarkets();
-  if (b.dataset.tab === "agent") renderAgent();
-  if (b.dataset.tab === "settings") renderSettings();
-});
-
-function fmt(n) { return typeof n === "number" && Number.isFinite(n) ? n.toLocaleString() : (n ?? "–"); }
-function ago(ts) { return new Date(ts).toLocaleTimeString(); }
-function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-function num(v, d = 0) { const n = Number(v); return Number.isFinite(n) ? n : d; }
-function isOpen(tab) { return !$("#tab-" + tab).classList.contains("hidden"); }
-
-// Only touch the DOM when the markup actually changed. Rewriting innerHTML with
-// identical content still tears down and rebuilds every node, which resets hover
-// state, closes open dropdowns and collapses expanded rows — the "flicker".
-const lastHTML = new WeakMap();
-function setHTML(sel, html) {
-  const el = typeof sel === "string" ? $(sel) : sel;
-  if (lastHTML.get(el) === html) return;
-  lastHTML.set(el, html);
-  el.innerHTML = html;
-}
-
-// Drop responses that arrive after a newer request for the same view was sent,
-// so a slow fetch can't paint stale data over fresh data.
-const latestReq = {};
-async function fetchLatest(key, url) {
-  const id = (latestReq[key] = (latestReq[key] ?? 0) + 1);
-  const data = await (await fetch(url)).json();
-  return id === latestReq[key] ? data : undefined;
-}
-
-async function refreshState() {
-  const data = await fetchLatest("state", "/api/state");
-  if (data === undefined) return;
-  state.state = data;
-  render();
-}
-
-function render() {
-  const s = state.state;
-  if (!s) return;
-  if (s.rate?.remaining != null && s.rate?.limit) {
-    const pct = Math.max(0, Math.min(100, (s.rate.remaining / s.rate.limit) * 100));
-    $("#rateFill").style.width = pct + "%";
-    $("#rateFill").style.background = pct < 25 ? "var(--bad)" : pct < 60 ? "var(--warn)" : "var(--accent)";
-    $("#rateText").textContent = `${s.rate.remaining}/${s.rate.limit}`;
-  }
-  $("#paused").classList.toggle("hidden", !s.scheduler?.paused);
-
-  const a = s.agent;
-  const accepted = s.contracts.filter(c => c.accepted && !c.fulfilled).length;
-  const offered = s.contracts.filter(c => !c.accepted && !c.expired && !c.fulfilled).length;
-  const cards = [
-    card("Agent", a ? [
-      kv("symbol", a.symbol), kv("credits", fmt(a.credits)), kv("HQ", a.headquarters),
-      kv("ships", a.shipCount), kv("faction", a.startingFaction)] : ["not loaded yet"]),
-    card("Fleet", [kv("ships", s.fleet.length),
-      kv("in transit", s.fleet.filter(x => x.nav?.status === "IN_TRANSIT").length),
-      kv("docked", s.fleet.filter(x => x.nav?.status === "DOCKED").length),
-      kv("in orbit", s.fleet.filter(x => x.nav?.status === "IN_ORBIT").length)]),
-    card("Contracts", [kv("total", s.contracts.length), kv("accepted", accepted), kv("offered", offered)]),
-    card("Scheduler", [kv("paused", String(!!s.scheduler?.paused)),
-      kv("pending wakeups", s.scheduler?.pending?.length ?? 0),
-      kv("socket", s.socket?.connected ? "connected" : "off"),
-      kv("directive", s.scheduler?.directive ?? "–")]),
-  ];
-  setHTML("#dashCards", cards.join(""));
-
-  const plan = s.plan?.plan;
-  setHTML("#planBox", plan
-    ? `<div>${esc(plan.thought || "")}</div>` +
-      plan.calls.map(c => `<div class="call">→ ${esc(c.tool)}(${esc(JSON.stringify(c.args ?? {}))})</div>`).join("") +
-      `<div class="dim" style="margin-top:6px">wake #${s.plan.wakeId} · ${ago(s.plan.ts)} · ${esc(s.plan.reason)}</div>`
-    : "no plan yet");
-
-  renderFleet(s.fleet);
-  if (isOpen("contracts")) renderContracts(s.contracts);
-  if (isOpen("agent")) renderWakeups(s);
-  if (isOpen("settings")) renderSettings();
-}
-
-function card(title, rows) { return `<div class="card"><div class="kv"><b>${esc(title)}</b></div>${rows.join("")}</div>`; }
-function kv(k, v) { return `<div class="kv"><span class="k">${esc(k)}</span><span>${esc(v)}</span></div>`; }
-
-function renderFleet(ships) {
-  setHTML("#fleetCards", ships.map(sh => {
-    const st = NAV_STATUSES.includes(sh.nav?.status) ? sh.nav.status : "DOCKED";
-    const fuelPct = num(sh.fuel?.capacity) > 0 ? (num(sh.fuel?.current) / num(sh.fuel?.capacity)) * 100 : 0;
-    const cargoPct = num(sh.cargo?.capacity) > 0 ? (num(sh.cargo?.units) / num(sh.cargo?.capacity)) * 100 : 0;
-    return `<div class="card">
-      <div class="kv"><b>${esc(sh.symbol)}</b><span class="badge b-${esc(st)}">${esc(st)}</span></div>
-      <div class="kv"><span class="k">at</span><span>${esc(sh.nav?.waypointSymbol ?? "")}</span></div>
-      <div class="kv"><span class="k">cooldown</span><span>${num(sh.cooldown?.remainingSeconds) > 0 ? num(sh.cooldown?.remainingSeconds) + "s" : "–"}</span></div>
-      <div class="dim" style="margin-top:6px">fuel ${num(sh.fuel?.current)}/${num(sh.fuel?.capacity)}</div>
-      <div class="bar"><i class="${fuelPct < 20 ? "bad" : fuelPct < 50 ? "warn" : ""}" style="width:${Math.min(100, fuelPct)}%"></i></div>
-      <div class="dim">cargo ${num(sh.cargo?.units)}/${num(sh.cargo?.capacity)}</div>
-      <div class="bar"><i style="width:${Math.min(100, cargoPct)}%"></i></div>
-    </div>`;
-  }).join("") || '<div class="dim">no ships cached (agent has not run yet)</div>');
-}
-
-// ---- Map ----
-async function loadUniverse() {
-  const data = await fetchLatest("universe", "/api/universe");
-  if (data === undefined) return;
-  state.universe = data;
-  const systems = state.universe.systems ?? [];
-  const sel = $("#systemSelect");
-  const current = sel.value;
-  setHTML(sel, systems.map(s => `<option>${esc(s.symbol)}</option>`).join("") || "<option>no systems cached</option>");
-  if (current && systems.some(s => s.symbol === current)) sel.value = current;
-  sel.onchange = renderMap;
-  renderMap();
-}
-
-function renderMap() {
-  const u = state.universe;
-  if (!u) return;
-  const system = $("#systemSelect").value;
-  const wps = (u.waypointsBySystem?.[system] ?? []);
-  const size = 640, pad = 40;
-  const xs = wps.map(w => num(w.x)), ys = wps.map(w => num(w.y));
-  const minX = Math.min(...xs, 0), maxX = Math.max(...xs, 1);
-  const minY = Math.min(...ys, 0), maxY = Math.max(...ys, 1);
-  const sx = v => pad + ((v - minX) / (maxX - minX || 1)) * (size - 2 * pad);
-  const sy = v => size - pad - ((v - minY) / (maxY - minY || 1)) * (size - 2 * pad);
-  const dots = wps.map(w => {
-    const hasShips = (w.ships ?? []).length > 0;
-    const traits = (w.traits ?? []).map(t => t.symbol || t).join(",");
-    return `<g class="wp" transform="translate(${sx(num(w.x))},${sy(num(w.y))})">
-      <title>${esc(w.symbol)} · ${esc(w.type)} · ${esc(traits)} · ships: ${esc((w.ships ?? []).join(", ") || "none")}</title>
-      <circle r="${hasShips ? 9 : 6}" fill="${hasShips ? "var(--accent)" : "#2d3a55"}" stroke="var(--line)" />
-      ${hasShips ? `<text y="3" text-anchor="middle" font-size="9" fill="#06251f">▮</text>` : ""}
-      <text y="-12" text-anchor="middle" font-size="9" fill="var(--dim)">${esc(w.symbol.split("-").pop())}</text>
-    </g>`;
-  }).join("");
-  setHTML("#mapBox", `<svg viewBox="0 0 ${size} ${size}" width="100%" style="max-width:${size}px">${dots}</svg>`);
-  setHTML("#transitFeed", (u.inTransit ?? []).map(t =>
-    `<div class="entry">${esc(t.symbol)}: ${esc(t.from)} → ${esc(t.to)} <span class="dim">arrives ${esc(new Date(t.arrival).toLocaleTimeString())}</span></div>`
-  ).join("") || '<div class="dim">nothing in transit</div>');
-}
-
-// ---- Markets ----
-async function loadMarkets() {
-  const good = $("#goodFilter").value.trim().toUpperCase();
-  const q = good ? `?good=${encodeURIComponent(good)}&limit=60` : "?limit=40";
-  const data = await fetchLatest("markets", "/api/markets/history" + q);
-  if (data === undefined) return;
-  state.marketHistory = data;
-  renderMarkets();
-}
-function renderMarkets() {
-  const rows = state.marketHistory.slice(0, 100).map(p =>
-    `<tr><td>${esc(p.good)}</td><td>${esc(p.waypoint)}</td><td>${fmt(p.purchasePrice)}</td><td>${fmt(p.sellPrice)}</td><td>${fmt(p.volume)}</td><td>${ago(p.ts)}</td></tr>`
-  ).join("");
-  setHTML("#marketsTable", rows
-    ? `<table><tr><th>good</th><th>waypoint</th><th>buy</th><th>sell</th><th>vol</th><th>seen</th></tr>${rows}</table>`
-    : '<div class="dim">no price history yet — it fills as the agent reads markets</div>');
-}
-
-// ---- Contracts ----
-function renderContracts(contracts) {
-  setHTML("#contractsBoard", contracts.map(c => {
-    const dl = c.deadlineToAccept ? Date.parse(c.deadlineToAccept) : (c.expiration ? Date.parse(c.expiration) : null);
-    const dlCls = dl ? (dl < Date.now() ? "over" : dl < Date.now() + 86400000 ? "soon" : "") : "";
-    const deliverables = (c.deliverables ?? []).map(d => {
-      const pct = d.required ? Math.min(100, (d.fulfilled / d.required) * 100) : 0;
-      return `<div class="dim">${esc(d.symbol)} → ${esc(d.destination)} ${d.fulfilled}/${d.required}</div><div class="bar"><i style="width:${pct}%"></i></div>`;
-    }).join("");
-    return `<div class="card" style="margin-bottom:8px">
-      <div class="kv"><b>${esc(c.id.slice(0, 12))} · ${esc(c.type)}</b>
-        <span>${c.fulfilled ? "✅ fulfilled" : c.accepted ? "accepted" : "offered"}</span></div>
-      <div class="kv"><span class="k">faction</span><span>${esc(c.faction)}</span></div>
-      <div class="kv"><span class="k">payment</span><span>${fmt(c.payment?.onAccepted)} now / ${fmt(c.payment?.onFulfilled)} on fulfill</span></div>
-      ${dl ? `<div class="kv"><span class="k">deadline</span><span class="deadline ${dlCls}">${new Date(dl).toLocaleString()}</span></div>` : ""}
-      ${deliverables}
-    </div>`;
-  }).join("") || '<div class="dim">no contracts cached</div>');
-}
-
-// ---- Activity ----
-async function loadActivity() {
-  const tool = $("#actFilter").value.trim();
-  const outcome = $("#actOutcome").value;
-  const q = new URLSearchParams();
-  if (tool) q.set("tool", tool);
-  if (outcome) q.set("outcome", outcome);
-  const data = await fetchLatest("activity", "/api/activity?" + q);
-  if (data === undefined) return;
-  state.activity = data;
-  const brief = r => {
-    if (r == null) return "";
-    if (Array.isArray(r)) return `${r.length} items`;
-    if (typeof r === "object") {
-      const k = Object.keys(r);
-      return `{ ${k.slice(0, 6).join(", ") + (k.length > 6 ? ", …" : "")} }`;
-    }
-    return String(r);
-  };
-  setHTML("#activityFeed", state.activity.slice().reverse().map(e => {
-    if (e.kind === "tool") {
-      return `<div class="entry details" data-id="${num(e.id)}">
-        <span class="oc-${esc(e.outcome)}">${esc(e.outcome)}</span> <b>${esc(e.tool)}</b>
-        <span class="meta">${ago(e.ts)} · ${num(e.requestsSpent)} req · ${num(e.durationMs)}ms</span>
-        <div>${esc(brief(e.result))}</div>
-        <pre class="${expandedActivity.has(num(e.id)) ? "" : "hidden"}">${esc(JSON.stringify({ args: e.args, guards: e.guards, result: e.result }, null, 1).slice(0, 4000))}</pre>
-      </div>`;
-    }
-    return `<div class="entry"><span class="meta">[${esc(e.kind)}] ${ago(e.ts)}</span> ${esc(e.text ?? "")}</div>`;
-  }).join("") || '<div class="dim">empty</div>');
-}
-// Expanded rows are remembered by id so new activity doesn't collapse them.
-const expandedActivity = new Set();
-$("#activityFeed").onclick = (ev) => {
-  const row = ev.target.closest(".entry.details");
-  if (!row || getSelection().toString()) return;
-  const id = num(row.dataset.id);
-  const open = row.querySelector("pre").classList.toggle("hidden") === false;
-  if (open) expandedActivity.add(id); else expandedActivity.delete(id);
-  lastHTML.delete($("#activityFeed")); // DOM no longer matches the cached markup
-};
-$("#actFilter").oninput = () => loadActivity();
-$("#actOutcome").onchange = () => loadActivity();
-
-async function loadSummaries() {
-  const items = await fetchLatest("summaries", "/api/summaries");
-  if (items === undefined) return;
-  setHTML("#summariesFeed", items.map(s =>
-    `<div class="entry"><span class="meta">wake #${num(s.wake)} · ${ago(s.ts)} · ${esc(s.reason)}</span><div>${esc(s.text)}</div></div>`
-  ).join("") || '<div class="dim">no wakes yet</div>');
-  setHTML("#dashSummaries", items.slice(0, 5).map(s =>
-    `<div class="entry"><span class="meta">wake #${num(s.wake)}</span> ${esc(s.text)}</div>`).join(""));
-}
-
-// ---- Agent tab ----
-function renderWakeups(s) {
-  setHTML("#wakeups", (s.scheduler?.pending ?? []).map(w =>
-    `<div class="entry"><span class="meta">${new Date(num(w.at)).toLocaleTimeString()}</span> ${esc(w.reason)} <span class="dim">(${esc(w.scope)})</span></div>`
-  ).join("") || '<div class="dim">nothing scheduled</div>');
-}
-
-async function renderAgent() {
-  renderWakeups(state.state);
-  if (!state.tools) state.tools = await (await fetch("/api/tools")).json();
-  setHTML("#toolList", state.tools.map(t =>
-    `<div class="entry"><b>${esc(t.name)}</b> <span class="dim">${esc(t.kind)} · ~${num(t.rateCost)} req</span><div class="dim">${esc(t.description)}</div></div>`
-  ).join(""));
-}
-
-// ---- Memory ----
-async function loadMemory() {
-  const m = await fetchLatest("memory", "/api/memory");
-  if (m === undefined) return;
-  setHTML("#goals", m.goals.map(g => `
-    <div class="entry goal"><div>
-      <span class="badge ${g.status === "active" ? "b-IN_ORBIT" : "b-DOCKED"}">${esc(g.status)}</span>
-      ${esc(g.description)} ${g.deadline ? `<span class="dim">due ${esc(g.deadline)}</span>` : ""}
-    </div>
-    ${g.status === "active" ? `<button class="btn ok" onclick="completeGoal('${esc(g.id)}')">✓</button>` : ""}</div>`
-  ).join("") || '<div class="dim">no goals</div>');
-  setHTML("#notes", m.notes.slice().reverse().map(n =>
-    `<div class="entry"><span class="meta">[${esc(n.kind)}] imp ${num(n.importance)} · ${esc((n.tags ?? []).join(", ")) || "no tags"}</span><div>${esc(n.content)}</div></div>`
-  ).join("") || '<div class="dim">agent has not remembered anything yet</div>');
-}
-window.completeGoal = async (id) => {
-  await fetch("/api/memory/goals/" + encodeURIComponent(id) + "/complete", { method: "POST" });
-  loadMemory();
-};
-$("#btnGoal").onclick = async () => {
-  const text = $("#goalInput").value.trim();
-  if (!text) return;
-  await fetch("/api/memory/goals", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ description: text }) });
-  $("#goalInput").value = "";
-  loadMemory();
-};
-
-// ---- Settings ----
-function renderSettings() {
-  const c = state.state?.config ?? {};
-  const s = state.state?.socket ?? {};
-  setHTML("#settingsCards", [
-    card("Runtime", [kv("model", c.model), kv("policy", c.policy), kv("panel port", c.port)]),
-    card("Budgets", [kv("min request interval", c.minIntervalMs + "ms"), kv("max actions/wake", c.maxActionsPerWake), kv("fallback wake", (c.fallbackWakeMs ?? 0) / 60000 + "min")]),
-    card("Socket ingest", [kv("connected", String(!!s.connected)), kv("events", num(s.events)), kv("last event", s.lastEventAt ? ago(s.lastEventAt) : "–")]),
-    card("Secrets", [kv("API token", "loaded from .env (never shown)"), kv("LLM key", "loaded from .env (never shown)")]),
-  ].join(""));
-}
-
-// ---- Controls ----
-$("#btnPause").onclick = () => fetch("/api/agent/pause", { method: "POST" }).then(refreshState);
-$("#btnResume").onclick = () => fetch("/api/agent/resume", { method: "POST" }).then(refreshState);
-$("#btnWake").onclick = () => fetch("/api/agent/wake", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ reason: "panel manual wake" }) });
-$("#btnDirective").onclick = async () => {
-  await fetch("/api/agent/directive", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ text: $("#directiveInput").value }) });
-};
-
-// ---- SSE with throttled refresh ----
-// Every API call the agent makes emits RateBudgetChanged/StateChanged, so during
-// a wake events arrive continuously. Refresh at most once per REFRESH_MS, only
-// the views that are visible, and not at all while the browser tab is hidden.
-const REFRESH_MS = 1500;
-let lastEvent = 0;
-let refreshTimer = null;
-let lastRefresh = 0;
-let refreshMissed = false;
-function refreshVisible() {
-  lastRefresh = Date.now();
-  refreshState(); loadSummaries();
-  if (isOpen("activity")) loadActivity();
-  if (isOpen("memory")) loadMemory();
-  if (isOpen("map")) loadUniverse();
-  if (isOpen("markets")) loadMarkets();
-}
-function scheduleRefresh() {
-  if (document.hidden) { refreshMissed = true; return; }
-  if (refreshTimer) return;
-  refreshTimer = setTimeout(() => {
-    refreshTimer = null;
-    refreshVisible();
-  }, Math.max(0, lastRefresh + REFRESH_MS - Date.now()));
-}
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && refreshMissed) { refreshMissed = false; scheduleRefresh(); }
-});
-function connect() {
-  const es = new EventSource("/api/events?since=" + lastEvent);
-  es.onopen = () => { $("#conn").textContent = "◉ live"; $("#conn").className = "live"; };
-  es.onerror = () => { $("#conn").textContent = "⚡ stale (reconnecting…)"; $("#conn").className = "stale"; };
-  es.onmessage = (ev) => {
-    const e = JSON.parse(ev.data);
-    lastEvent = Math.max(lastEvent, e.ts);
-    scheduleRefresh();
-  };
-}
-
-refreshState(); loadSummaries();
-connect();
-</script>
+  <div class="main">
+    <header class="strip" id="strip">
+      <div class="strip-status">
+        <span class="beacon" id="beacon" aria-hidden="true"></span>
+        <div>
+          <div class="status-title" id="statusTitle">Connecting</div>
+          <div class="status-sub" id="statusSub">waiting for harness…</div>
+        </div>
+      </div>
+      <div class="strip-figures">
+        <div class="figure">
+          <span class="figure-label">Credits</span>
+          <span class="figure-value" id="stripCredits">–</span>
+          <span class="figure-delta" id="stripDelta"></span>
+        </div>
+        <div class="figure">
+          <span class="figure-label">API budget</span>
+          <span class="meter" id="rateMeter"><i></i></span>
+          <span class="figure-small" id="rateText">–</span>
+        </div>
+        <div class="figure hide-md">
+          <span class="figure-label">LLM tokens</span>
+          <span class="figure-small" id="stripTokens">–</span>
+        </div>
+      </div>
+      <div class="strip-controls">
+        <button class="btn" id="btnWake" title="Run a wake now (works while paused)">Wake now</button>
+        <button class="btn btn-toggle" id="btnPause">Pause</button>
+      </div>
+    </header>
+    <main class="view" id="view" tabindex="-1"></main>
+  </div>
+</div>
+<div class="tooltip" id="tooltip" role="status" hidden></div>
+<div class="toast" id="toast" role="status" hidden></div>
+<script src="app.js"></script>
 </body>
 </html>

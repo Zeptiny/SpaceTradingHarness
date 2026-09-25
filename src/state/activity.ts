@@ -1,13 +1,18 @@
 import type { ToolOutcome } from "../events/bus.js";
 import { appendJsonl, dataFile, parseJsonl, readTail } from "./persist.js";
+import { runtime } from "./runtime.js";
 
 export interface ActivityEntry {
   id: number;
   ts: number;
-  kind: "tool" | "wake" | "summary" | "system";
+  /** Wake id this entry belongs to (absent for entries outside a wake). */
+  wake?: number | undefined;
+  kind: "tool" | "wake" | "thought" | "summary" | "system";
   tool?: string | undefined;
   args?: unknown;
   outcome?: ToolOutcome | undefined;
+  /** One-line human summary of a tool call's outcome. */
+  summary?: string | undefined;
   result?: unknown;
   guards?: { guard: string; ok: boolean; reason?: string | undefined }[] | undefined;
   requestsSpent?: number | undefined;
@@ -15,7 +20,7 @@ export interface ActivityEntry {
   text?: string | undefined;
 }
 
-const RING = 500;
+const RING = 1_000;
 
 class ActivityLog {
   private entries: ActivityEntry[] = [];
@@ -32,17 +37,27 @@ class ActivityLog {
   }
 
   append(entry: Omit<ActivityEntry, "id" | "ts"> & { ts?: number }): ActivityEntry {
-    const full: ActivityEntry = { id: this.nextId++, ts: entry.ts ?? Date.now(), ...entry };
+    const full: ActivityEntry = { id: this.nextId++, ts: entry.ts ?? Date.now(), wake: runtime.wake?.id, ...entry };
     this.entries.push(full);
     if (this.entries.length > RING) this.entries.shift();
     appendJsonl(this.file, full, 8 * 1024 * 1024, RING);
     return full;
   }
 
-  query(opts: { tool?: string | undefined; outcome?: ToolOutcome | undefined; since?: number | undefined; limit?: number | undefined } = {}): ActivityEntry[] {
+  query(opts: {
+    tool?: string | undefined;
+    outcome?: ToolOutcome | undefined;
+    wake?: number | undefined;
+    since?: number | undefined;
+    limit?: number | undefined;
+  } = {}): ActivityEntry[] {
     let out = this.entries;
-    if (opts.tool) out = out.filter(e => e.tool === opts.tool);
+    if (opts.tool) {
+      const q = opts.tool.toLowerCase();
+      out = out.filter(e => e.tool?.toLowerCase().includes(q));
+    }
     if (opts.outcome) out = out.filter(e => e.outcome === opts.outcome);
+    if (opts.wake !== undefined) out = out.filter(e => e.wake === opts.wake);
     if (opts.since) out = out.filter(e => e.ts > opts.since!);
     const limit = opts.limit ?? 100;
     return out.slice(-limit);

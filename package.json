@@ -12,11 +12,12 @@
     "check:arch": "node scripts/check_architecture.mjs",
     "check:codegen": "python3 scripts/generate_api_types.py && git diff --exit-code -- src/generated",
     "typecheck": "tsc --noEmit",
-    "test": "AGENT_MIN_WAKE_GAP_MS=500 tsx --env-file=.env --test src/agent/scheduler.test.ts src/guards/purchase.test.ts src/state/intel.test.ts",
+    "test": "AGENT_MIN_WAKE_GAP_MS=500 tsx --env-file-if-exists=.env --test \"src/**/*.test.ts\"",
     "build": "tsc",
     "smoke": "tsx --env-file=.env src/smoke.ts",
     "start": "tsx watch --env-file=.env src/index.ts",
-    "start:once": "tsx --env-file=.env src/index.ts"
+    "start:once": "tsx --env-file=.env src/index.ts",
+    "demo": "tsx src/demo.ts"
   },
   "dependencies": {
     "express": "^4.21.2",

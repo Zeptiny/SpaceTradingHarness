@@ -41,8 +41,7 @@ class PriceHistory {
     saveJsonAtomic(this.file, this.history);
   }
 
-  record(market: Market): void {
-    const ts = Date.now();
+  record(market: Market, ts = Date.now()): void {
     let changed = false;
     for (const g of market.tradeGoods ?? []) {
       const key = `${market.symbol}:${g.symbol}`;
@@ -63,7 +62,8 @@ class PriceHistory {
     if (changed) this.persist();
   }
 
-  query(opts: { good?: string; waypoint?: string; limit?: number } = {}): PricePoint[] {
+  /** limit = points per waypoint:good series; cap = max points overall (default 5×limit). */
+  query(opts: { good?: string; waypoint?: string; limit?: number; cap?: number } = {}): PricePoint[] {
     const limit = opts.limit ?? 30;
     const out: PricePoint[] = [];
     for (const [key, arr] of Object.entries(this.history)) {
@@ -72,7 +72,7 @@ class PriceHistory {
       if (opts.good && good !== opts.good) continue;
       out.push(...arr.slice(-limit));
     }
-    return out.sort((a, b) => b.ts - a.ts).slice(0, limit * 5);
+    return out.sort((a, b) => b.ts - a.ts).slice(0, opts.cap ?? limit * 5);
   }
 
   /** Latest observation per (waypoint, good). */

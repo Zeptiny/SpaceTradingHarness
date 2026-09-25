@@ -1,15 +1,15 @@
 import { z } from "zod";
 import { api } from "../client/index.js";
-import { mirror, storeKeys, upsertShip } from "../state/store.js";
+import { observeAgent, upsertContract, upsertShip } from "../state/store.js";
 import { registerTool } from "./registry.js";
 import {
   canBuyShip, cargoHasGood, cargoHasRoom, cooldownClear, hasFuelForRoute, inOrbit, isDocked,
-  knownShip, marketSellsFuel, marketTrades, notInTransit, shipHasMount, waypointHasTrait,
+  knownShip, marketSellsFuel, marketTrades, notInTransit, shipHasMount,
 } from "../guards/index.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
 import { config } from "../config.js";
 import { cooldownWakeAt, etaWakeAt } from "../utils/time.js";
-import { compactShip } from "../state/projections.js";
+import { compactCargo, compactShip } from "../state/projections.js";
 import { ledger } from "../state/ledger.js";
 import { ShipTypeValues, type ShipNavFlightMode } from "../generated/types.js";
 
@@ -45,7 +45,7 @@ registerTool({
 
 registerTool({
   name: "navigate",
-  description: "Fly ship to another waypoint in the same system (auto-orbits if docked). Optional flightMode: CRUISE (default), BURN (2x speed, more fuel), DRIFT (no fuel, slow). Harness wakes on arrival.",
+  description: "Fly ship to another waypoint in the same system (auto-orbits if docked). Optional flightMode: CRUISE (fuel ≈ distance), BURN (faster, 2× fuel), DRIFT (1 fuel, very slow — use when stranded). Without flightMode the ship's current mode is kept. Harness wakes on arrival.",
   kind: "action",
   input: z.object({
     shipSymbol: z.string(),
@@ -76,12 +76,13 @@ registerTool({
   description: "Refuel ship to full at a waypoint selling FUEL (auto-docks if in orbit).",
   kind: "action",
   input: z.object({ shipSymbol: z.string() }),
-  guards: [knownShip, notInTransit, waypointHasTrait("MARKETPLACE"), marketSellsFuel],
+  guards: [knownShip, notInTransit, marketSellsFuel],
   rateCost: 4,
   handler: async ({ shipSymbol }, ctx) => {
     const ship = await ctx.fresh.ship(shipSymbol);
     await ensureDocked(shipSymbol, ship);
     const { data } = await api.refuel(shipSymbol);
+    observeAgent(data.agent);
     if (ship) upsertShip({ ...ship, fuel: data.fuel });
     return { summary: `${shipSymbol} +${data.transaction.units} fuel for ${data.transaction.totalPrice} cr`, result: { fuel: data.fuel, transaction: data.transaction } };
   },
@@ -134,14 +135,18 @@ registerTool({
   description: "Buy units of a trade good into ship cargo at a market that EXPORTs/EXCHANGEs it (auto-docks if in orbit). Units per call are capped by the good's tradeVolume.",
   kind: "action",
   input: z.object({ shipSymbol: z.string(), symbol: z.string(), units: z.number().int().positive() }),
-  guards: [knownShip, notInTransit, waypointHasTrait("MARKETPLACE"), marketTrades("buy"), cargoHasRoom()],
+  guards: [knownShip, notInTransit, marketTrades("buy"), cargoHasRoom()],
   rateCost: 4,
   handler: async ({ shipSymbol, symbol, units }, ctx) => {
     const ship = await ctx.fresh.ship(shipSymbol);
     await ensureDocked(shipSymbol, ship);
     const { data } = await api.purchaseCargo(shipSymbol, symbol, units);
+    observeAgent(data.agent);
     if (ship) upsertShip({ ...ship, cargo: data.cargo });
-    return { summary: `${shipSymbol} bought ${units}x ${symbol} for ${data.transaction.totalPrice} cr`, result: { cargo: data.cargo, transaction: data.transaction } };
+    return {
+      summary: `${shipSymbol} bought ${units}x ${symbol} for ${data.transaction.totalPrice} cr`,
+      result: { cargo: compactCargo(data.cargo), transaction: data.transaction, credits: data.agent.credits },
+    };
   },
 });
 
@@ -150,14 +155,18 @@ registerTool({
   description: "Sell units of a trade good from ship cargo at a market that IMPORTs/EXCHANGEs it (auto-docks if in orbit). Units per call are capped by the good's tradeVolume.",
   kind: "action",
   input: z.object({ shipSymbol: z.string(), symbol: z.string(), units: z.number().int().positive() }),
-  guards: [knownShip, notInTransit, waypointHasTrait("MARKETPLACE"), marketTrades("sell"), cargoHasGood],
+  guards: [knownShip, notInTransit, marketTrades("sell"), cargoHasGood],
   rateCost: 4,
   handler: async ({ shipSymbol, symbol, units }, ctx) => {
     const ship = await ctx.fresh.ship(shipSymbol);
     await ensureDocked(shipSymbol, ship);
     const { data } = await api.sellCargo(shipSymbol, symbol, units);
+    observeAgent(data.agent);
     if (ship) upsertShip({ ...ship, cargo: data.cargo });
-    return { summary: `${shipSymbol} sold ${units}x ${symbol} for ${data.transaction.totalPrice} cr`, result: { cargo: data.cargo, transaction: data.transaction } };
+    return {
+      summary: `${shipSymbol} sold ${units}x ${symbol} for ${data.transaction.totalPrice} cr`,
+      result: { cargo: compactCargo(data.cargo), transaction: data.transaction, credits: data.agent.credits },
+    };
   },
 });
 
@@ -172,7 +181,7 @@ registerTool({
     const { data } = await api.jettison(shipSymbol, symbol, units);
     const ship = await ctx.fresh.ship(shipSymbol);
     if (ship) upsertShip({ ...ship, cargo: data.cargo });
-    return { summary: `${shipSymbol} jettisoned ${units}x ${symbol}`, result: { cargo: data.cargo } };
+    return { summary: `${shipSymbol} jettisoned ${units}x ${symbol}`, result: { cargo: compactCargo(data.cargo) } };
   },
 });
 
@@ -184,7 +193,8 @@ registerTool({
   rateCost: 1,
   handler: async ({ contractId }) => {
     const { data } = await api.acceptContract(contractId);
-    mirror.invalidate(storeKeys.contracts);
+    observeAgent(data.agent);
+    upsertContract(data.contract);
     return { summary: `accepted ${contractId} (+${data.contract.terms.payment.onAccepted} upfront)`, result: data.contract };
   },
 });
@@ -201,7 +211,7 @@ registerTool({
     await ensureDocked(shipSymbol, ship);
     const { data } = await api.deliverContract(contractId, shipSymbol, tradeSymbol, units);
     if (ship) upsertShip({ ...ship, cargo: data.cargo });
-    mirror.invalidate(storeKeys.contracts);
+    upsertContract(data.contract);
     return { summary: `delivered ${units}x ${tradeSymbol} to ${contractId}`, result: data.contract };
   },
 });
@@ -214,7 +224,8 @@ registerTool({
   rateCost: 1,
   handler: async ({ contractId }) => {
     const { data } = await api.fulfillContract(contractId);
-    mirror.invalidate(storeKeys.contracts);
+    observeAgent(data.agent);
+    upsertContract(data.contract);
     return { summary: `fulfilled ${contractId} (+${data.contract.terms.payment.onFulfilled} cr)`, result: data.contract };
   },
 });
@@ -229,7 +240,7 @@ registerTool({
   handler: async ({ shipType, waypointSymbol }) => {
     const { data } = await api.purchaseShip(shipType, waypointSymbol);
     upsertShip(data.ship);
-    mirror.set(storeKeys.agent, data.agent);
+    observeAgent(data.agent);
     ledger.recordShipPurchase(data.transaction.price);
     return {
       summary: `purchased ${data.ship.symbol} (${shipType}) at ${waypointSymbol} for ${data.transaction.price} cr; credits now ${data.agent.credits}`,

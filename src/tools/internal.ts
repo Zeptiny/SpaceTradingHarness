@@ -5,12 +5,17 @@ import { prices } from "../state/prices.js";
 import { runtime } from "../state/runtime.js";
 import { clampWakeAt } from "../utils/time.js";
 import { systemOf } from "../utils/symbols.js";
+import { distance, fuelCost } from "../utils/nav.js";
 
 registerTool({
   name: "end_loop",
-  description: "Finish this wake. Optionally pass wakeAt (ISO timestamp) to schedule the next wake at a time you choose (ship arrivals and cooldowns are auto-scheduled from tool results regardless). Without wakeAt, a periodic fallback wake covers you. Use freely — call it as soon as there is nothing more worth doing this wake.",
+  description: "Finish this wake. Always include summary: 1–2 plain sentences for the human operator — what you did this wake and what you are waiting on. Optionally pass wakeAt (ISO timestamp) to schedule the next wake (ship arrivals and cooldowns are auto-scheduled from tool results regardless; without wakeAt a periodic fallback wake covers you). Other calls in the same batch still run. Call it as soon as there is nothing more worth doing this wake.",
   kind: "internal",
-  input: z.object({ wakeAt: z.string().optional(), reason: z.string().optional() }),
+  input: z.object({
+    summary: z.string().max(600).optional(),
+    wakeAt: z.string().optional(),
+    reason: z.string().optional(),
+  }),
   rateCost: 0,
   handler: async ({ wakeAt, reason }) => {
     if (wakeAt !== undefined) {
@@ -141,10 +146,11 @@ registerTool({
     if (!from || !to) {
       return { summary: `waypoint data unavailable for ${!from ? ship.nav.waypointSymbol : toWaypoint}`, result: null };
     }
-    const dist = Math.hypot(to.x - from.x, to.y - from.y);
+    const dist = distance(from, to);
+    const cruise = fuelCost(dist, "CRUISE"), burn = fuelCost(dist, "BURN"), drift = fuelCost(dist, "DRIFT");
     return {
-      summary: `${from.symbol} → ${to.symbol}: distance ${Math.round(dist)}, fuel ~${Math.ceil(dist)} (CRUISE) / ~${Math.ceil(dist * 2)} (BURN) / 0 (DRIFT); ship fuel ${ship.fuel.current}/${ship.fuel.capacity}`,
-      result: { distance: dist, fuelCruise: Math.ceil(dist), fuelBurn: Math.ceil(dist * 2), fuelDrift: 0, currentFuel: ship.fuel.current },
+      summary: `${from.symbol} → ${to.symbol}: distance ${Math.round(dist)}, fuel ~${cruise} (CRUISE) / ~${burn} (BURN) / ${drift} (DRIFT); ship fuel ${ship.fuel.current}/${ship.fuel.capacity}`,
+      result: { distance: Math.round(dist), fuelCruise: cruise, fuelBurn: burn, fuelDrift: drift, currentFuel: ship.fuel.current },
     };
   },
 });

@@ -6,9 +6,11 @@ import { registerTool } from "./registry.js";
 import { systemOf } from "../utils/symbols.js";
 import { shipyards } from "../state/shipyards.js";
 import { atlas } from "../state/atlas.js";
-import type { System, Waypoint, Faction, Shipyard } from "../generated/types.js";
+import type { System, Waypoint, Faction } from "../generated/types.js";
 import { WaypointTraitSymbolValues } from "../generated/types.js";
-import { compactShip } from "../state/projections.js";
+import {
+  compactFaction, compactMarket, compactShip, compactShipyard, compactWaypoint, contractSummary,
+} from "../state/projections.js";
 
 registerTool({
   name: "get_status",
@@ -81,16 +83,17 @@ registerTool({
 
 registerTool({
   name: "get_contracts",
-  description: "Your contracts with terms, deliverables progress and deadlines. Always fresh from the API.",
+  description: "Your contracts with deliverables progress, payment and deadlines. Always fresh from the API. Fulfilled/expired contracts are omitted unless includeClosed is true.",
   kind: "read",
-  input: z.object({}).strict(),
+  input: z.object({ includeClosed: z.boolean().default(false) }),
   rateCost: 1,
-  handler: async () => {
+  handler: async ({ includeClosed }) => {
     const contracts = await refreshContracts();
     if (!contracts) throw new Error("contracts fetch failed");
+    const items = contracts.map(contractSummary).filter(c => includeClosed || (!c.fulfilled && !c.expired));
     return {
-      summary: contracts.map(c => `${c.id.slice(0, 8)}[${c.accepted ? "accepted" : "offered"}${c.fulfilled ? ",done" : ""}]`).join(" "),
-      result: contracts,
+      summary: items.map(c => `${c.id.slice(0, 8)}[${c.fulfilled ? "fulfilled" : c.expired ? "expired" : c.accepted ? "accepted" : "offered"}]`).join(" ") || "no open contracts",
+      result: items,
     };
   },
 });
@@ -141,7 +144,7 @@ registerTool({
     mirror.set(storeKeys.waypoint(system, waypointSymbol), wp);
     mergeSystemWaypoints(system, [wp]);
     atlas.record([wp]);
-    return { summary: `${wp.symbol} ${wp.type} [${wp.traits.map(t => t.symbol).join(",")}]`, result: wp };
+    return { summary: `${wp.symbol} ${wp.type} [${wp.traits.map(t => t.symbol).join(",")}]`, result: compactWaypoint(wp) };
   },
 });
 
@@ -156,8 +159,10 @@ registerTool({
     const market = await fetchMarket(system, waypointSymbol);
     const goods = market.tradeGoods ?? [];
     return {
-      summary: `${waypointSymbol}: ${goods.length} goods (e.g. ${goods.slice(0, 3).map(g => g.symbol).join(", ")})`,
-      result: market,
+      summary: goods.length
+        ? `${waypointSymbol}: ${goods.length} goods with live prices`
+        : `${waypointSymbol}: goods listed, prices hidden (no ship present)`,
+      result: compactMarket(market),
     };
   },
 });
@@ -171,12 +176,12 @@ registerTool({
   handler: async ({ waypointSymbol }) => {
     const system = systemOf(waypointSymbol);
     const { data } = await api.getShipyard(system, waypointSymbol);
-    mirror.set(storeKeys.market(system, waypointSymbol) + ":shipyard", data);
+    mirror.set(storeKeys.shipyard(system, waypointSymbol), data);
     shipyards.record(data);
     const priced = (data.ships ?? []).map(s => `${s.type}=${s.purchasePrice}`);
     return {
       summary: `${waypointSymbol} sells: ${priced.length ? priced.join(", ") : `${(data.shipTypes ?? []).map(t => t.type).join(", ")} (prices hidden — no ship of yours here)`}`,
-      result: data,
+      result: compactShipyard(data),
     };
   },
 });
@@ -209,13 +214,20 @@ registerTool({
 
 registerTool({
   name: "get_supply_chain",
-  description: "Trade relationships between goods: what refines/produces into what.",
+  description: "Trade relationships between goods: which imports a market needs to produce each export. Pass tradeSymbol to get just the inputs of that good and the goods it feeds into (the full map is large).",
   kind: "read",
-  input: z.object({}).strict(),
+  input: z.object({ tradeSymbol: z.string().optional() }),
   rateCost: 1,
-  handler: async () => {
+  handler: async ({ tradeSymbol }) => {
     const r = await api.supplyChain();
-    return { summary: "supply chain data", result: r.data };
+    const map = ((r.data as { exportToImportMap?: Record<string, string[]> }).exportToImportMap ?? {});
+    if (!tradeSymbol) return { summary: `supply chain: ${Object.keys(map).length} exports`, result: map };
+    const inputs = map[tradeSymbol] ?? [];
+    const feeds = Object.entries(map).filter(([, ins]) => ins.includes(tradeSymbol)).map(([out]) => out);
+    return {
+      summary: `${tradeSymbol}: made from [${inputs.join(", ") || "nothing"}], feeds [${feeds.join(", ") || "nothing"}]`,
+      result: { tradeSymbol, madeFrom: inputs, feedsInto: feeds },
+    };
   },
 });
 
@@ -228,6 +240,6 @@ registerTool({
   handler: async () => {
     const factions = await paginate<Faction>("getFactions", {}, 3);
     mirror.set("factions", factions);
-    return { summary: factions.map(f => f.symbol).join(", "), result: factions };
+    return { summary: factions.map(f => f.symbol).join(", "), result: factions.map(compactFaction) };
   },
 });
