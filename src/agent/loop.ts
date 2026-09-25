@@ -12,10 +12,13 @@ import { runtime } from "../state/runtime.js";
 import { getTool, toolSpecs } from "../tools/registry.js";
 import { executeTool, type ExecOutcome } from "../tools/executor.js";
 import { scheduler, type Wakeup } from "./scheduler.js";
-import { chat, extractJson, type ChatMessage } from "./llm.js";
-import { compactShip, contractSummary, isContractOpen } from "../state/projections.js";
+import { chat, extractJson, isRetryableLlmError, type ChatMessage } from "./llm.js";
+import { compactShip, contractSummary, fleetTable, isContractOpen } from "../state/projections.js";
 import { shipyards } from "../state/shipyards.js";
 import { creditHistory } from "../state/credits.js";
+import { earnings, type ShipEarnings } from "../state/earnings.js";
+import { routines, describeSpec } from "../state/routines.js";
+import { mapSystem } from "../state/collector.js";
 import type { WakeStats } from "../state/summaries.js";
 import type { Agent, Ship } from "../generated/types.js";
 
@@ -28,9 +31,16 @@ How you work:
 - This conversation is your working memory for the whole wake: every tool call and result stays in context. Before re-fetching data, check what you already have — identical repeat reads are answered from cache without hitting the API.
 - You decide when the wake ends: call end_loop when there is nothing more worth doing — optionally with wakeAt (ISO) to choose the next wake time. Ship arrivals and cooldowns are auto-scheduled from tool results regardless.
 - Guards fail locally before any action request is sent — read the reason and adapt (fetch market/waypoint data, refuel, move a ship to the shipyard). Guards read live server state: a rejection is never stale cache or clock skew.
-- Every tool result carries now (current time). A ship IN_TRANSIT or on cooldown cannot act until the time its rejection names; don't retry before then. Use wait_for_ship for short waits, otherwise give other ships work or end_loop.
+- Every tool result carries now (current time). A ship IN_TRANSIT or on cooldown cannot act until the time its rejection names; don't retry before then. Use wait_for_next for short waits (it returns when the first busy ship is ready, with the market it arrived at), otherwise give other ships work or end_loop.
+- After each round of tool results you get a FLEET table: every ship's location, cargo, fuel, when it can act and its routine. Trust it over older results.
 - Identical reads within a wake are answered from cache for up to 30s, until you take an action or wait; after that, reads hit the API again.
 - When you finish, call end_loop with a short summary for the human operator.
+
+Let the harness do the repetition:
+- Routines (assign_routine) run a ship's loop without you: trade (buy at A, sell at B, repeat while the margin holds), mine (extract, dump what you don't keep, deliver contract goods, sell, repeat) and scout (probes cycle through markets to keep prices fresh). You are woken only when a routine stops, with the reason. Put every ship with a repeatable job on a routine and spend your turns on decisions: which routes, which ships to buy, when to move a ship to better work. A ship on a routine refuses your direct actions until cancel_routine.
+- goto sends a ship anywhere, planning fuel stops and gate jumps, and wakes you on arrival. Prefer it to chains of navigate/refuel/jump.
+- The harness also tops up fuel whenever a ship leaves a market that sells it (navigate refuel false opts out), reads the market wherever a ship arrives, fulfils a contract when its last delivery lands and negotiates the next offer (accepting stays with you). sell_all clears a hold in one call.
+- Prices are named from your side: youPay (or pay) = what a market charges you per unit, youGet (or get) = what it pays you per unit.
 
 Strategy:
 - Every ship works, every wake. Working memory tags each ship's state; any ship marked IDLE needs a job this wake (a probe you deliberately parked at a market or shipyard counts as working). Plan all ships together and batch their calls in the same turn — ships run in parallel, and an idle ship is lost income. Don't end the wake while a ship is idle and you can still act.
@@ -38,7 +48,7 @@ Strategy:
 - Parallel income: (1) Trading — buy where a good is EXPORTed cheap, sell where it is IMPORTed dear; check tradeVolume per transaction and that margin × units clearly beats fuel. (2) Mining — mining drones / ore hounds extract at asteroid fields and sell (or hand off via transfer_cargo to a hauler). (3) Probes — cheap ships parked at markets and shipyards keep prices visible without spending fuel.
 - Invest continuously. When economy.investable covers a ship's price, buy one. Default order when unsure: 1–2 probes early to map markets and shipyards; then light haulers for trading once you know a profitable route, or mining drones if an asteroid field with nearby buyers exists. Keep buying while payback looks good. purchase_ship needs one of your ships at the shipyard (that is also how prices get revealed; prices you've seen are in economy.knownShipOffers). Assign every new ship a job in the same wake.
 - Keep the reserve (economy.reserve) for fuel, cargo capital and contract purchases; purchase_ship refuses buys that would dip below it.
-- Working memory does the bookkeeping for you: economy.trend is your measured income (earned = credit change + ship spend), market.tradeLeads are the best buy-here/sell-there spreads from prices your ships have seen (refreshed at every waypoint where a ship sits), map lists known markets (with what each exports/imports), shipyards and asteroids with coordinates, gates lists your system's jump gate and the systems it connects to. The harness fills these in between wakes. Use them before spending calls on discovery; send a ship or probe to market.unpricedMarkets to widen coverage.
+- Working memory does the bookkeeping for you: economy.trend is your measured income (earned = credit change + ship spend), economy.perShip is what each ship has earned (trade, fuel and contract money its own actions moved) against what it cost, market.tradeLeads are the best buy-here/sell-there spreads from prices your ships have seen (refreshed at every waypoint where a ship sits), map lists known markets (with what each exports/imports), shipyards and asteroids with coordinates, gates lists your system's jump gate and the systems it connects to. The harness fills these in between wakes. Use them before spending calls on discovery; send a ship or probe to market.unpricedMarkets to widen coverage.
 - Track what works: remember() profitable routes (good, buy at, sell at, margin) and ship payback; set_goal for fleet-size and credit targets and complete them as you pass them.
 
 Game mechanics:
@@ -66,17 +76,21 @@ interface WorkingMemory {
     investable: number | null;
     fleetSize: number;
     idleShips: string[];
+    perShip: ShipEarnings[];
     knownShipOffers: { type: string; price: number; waypoint: string; supply: string; seenMinutesAgo: number }[];
     trend: { lastHour: Trend | null; lastDay: Trend | null };
   };
   market: {
     scannedThisWake: string[];
+    /** Live prices where a ship sits now (read within the last 10 minutes). */
+    atShips: Record<string, string[]>;
     tradeLeads: TradeLead[];
     unpricedMarkets: string[];
   };
   map: ReturnType<typeof atlas.summary>;
   gates: GateSummary[];
   fleet: { asOf: string; ships: unknown[] };
+  routines: unknown[];
   contracts: { asOf: string; items: unknown[]; closedCount: number };
   goals: unknown[];
   notes: unknown[];
@@ -88,6 +102,17 @@ interface WorkingMemory {
 async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   const [agent, ships, contracts] = await Promise.all([refreshAgent(), refreshFleet(), refreshContracts()]);
   const alerts: string[] = [];
+  // A ship in a system the harness hasn't mapped yet: map it before the agent
+  // reasons about it (a partial map once made a model decide it had no gate).
+  for (const system of new Set((ships ?? []).map(s => s.nav.systemSymbol))) {
+    if (!atlas.system(system)?.mapped) {
+      await mapSystem(system).catch(err => console.warn(`[loop] mapping ${system} failed:`, err instanceof Error ? err.message : err));
+    }
+  }
+  if (ships) {
+    earnings.track(ships.map(s => s.symbol));
+    routines.prune(ships.map(s => s.symbol));
+  }
   if (!agent) alerts.push("agent data unavailable (API refresh failed) — retry get_my_agent before spending credits");
   if (!ships) alerts.push("fleet data unavailable (API refresh failed) — verify with list_ships before acting");
   if (!contracts) alerts.push("contracts data unavailable (API refresh failed)");
@@ -101,6 +126,8 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
 
   const now = new Date().toISOString();
   const shipState = (s: Ship): string => {
+    const r = routines.active(s.symbol);
+    if (r) return `ROUTINE ${describeSpec(r.spec)} (${r.phase})`;
     if (s.nav.status === "IN_TRANSIT") return `IN_TRANSIT to ${s.nav.route.destination.symbol} until ${s.nav.route.arrival}`;
     if (s.cooldown.remainingSeconds > 0) return `COOLDOWN ${s.cooldown.remainingSeconds}s`;
     return `IDLE (${s.nav.status} at ${s.nav.waypointSymbol})`;
@@ -139,7 +166,12 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     .map(w => w.symbol);
   const unmapped = fleetSystems.filter(sys => !atlas.system(sys)?.mapped);
   if (unmapped.length) {
-    alerts.push(`map of ${unmapped.join(", ")} incomplete — the harness maps it between wakes; call get_system_waypoints only if you need it this wake`);
+    alerts.push(`map of ${unmapped.join(", ")} incomplete (mapping failed) — get_system_waypoints reads a whole system in one call`);
+  }
+  const atShips: Record<string, string[]> = {};
+  for (const wp of new Set((ships ?? []).filter(s => s.nav.status !== "IN_TRANSIT").map(s => s.nav.waypointSymbol))) {
+    const lines = prices.snapshot(wp, 10 * 60_000);
+    if (lines) atShips[wp] = lines;
   }
   const bestBuy = (good: string): { youPay: number; at: string } | null => {
     const src = latestPrices
@@ -180,11 +212,13 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
       investable,
       fleetSize: ships?.length ?? 0,
       idleShips,
+      perShip: ships ? earnings.summary(ships.map(s => s.symbol)) : [],
       knownShipOffers: offers,
       trend,
     },
     market: {
       scannedThisWake: [...scan.markets, ...scan.shipyards.map(s => `${s} (shipyard)`)],
+      atShips,
       tradeLeads,
       unpricedMarkets,
     },
@@ -194,6 +228,15 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
       asOf: ships ? now : "unavailable",
       ships: (ships ?? []).map(s => ({ state: shipState(s), ...compactShip(s) })),
     },
+    routines: routines.all().map(r => ({
+      ship: r.ship,
+      routine: describeSpec(r.spec),
+      status: r.status,
+      phase: r.phase,
+      trips: r.trips,
+      tradeProfit: r.profit,
+      ...(r.endReason ? { endReason: r.endReason } : {}),
+    })),
     contracts: {
       asOf: contracts ? now : "unavailable",
       items: openContracts.map(c => {
@@ -207,7 +250,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     recentSummaries: summaries.recent(3).map(s => ({ wake: s.wake, text: s.text })),
     limits: {
       maxActions: Math.max(config.agent.maxActionsPerWake, config.agent.actionsPerShip * (ships?.length ?? 0)),
-      maxRounds: config.agent.maxRoundsPerWake,
+      maxRounds: Math.max(config.agent.maxRoundsPerWake, config.agent.roundsPerShip * (ships?.length ?? 0)),
     },
     alerts,
   };
@@ -349,6 +392,30 @@ function recordCachedOutcome(outcome: ExecOutcome, args: unknown): void {
   });
 }
 
+const LLM_RETRY_BACKOFF_MS = [5_000, 15_000, 30_000];
+const LLM_FAILURE_REWAKE_MS = 60_000;
+const FLEET_PREFIX = "FLEET NOW";
+const FLEET_SUPERSEDED = `${FLEET_PREFIX}: [superseded by the newer table below]`;
+
+/**
+ * After each round, one fresh fleet table (1 request per 20 ships). Older
+ * tables are blanked so only the latest costs context.
+ */
+async function appendFleetTable(messages: ChatMessage[]): Promise<void> {
+  const ships = await refreshFleet();
+  if (!ships) return;
+  for (const m of messages) {
+    if (m.role === "user" && typeof m.content === "string" && m.content.startsWith(FLEET_PREFIX) && m.content !== FLEET_SUPERSEDED) {
+      m.content = FLEET_SUPERSEDED;
+    }
+  }
+  const table = fleetTable(ships, symbol => {
+    const r = routines.active(symbol);
+    return r ? { description: describeSpec(r.spec), phase: r.phase } : undefined;
+  });
+  messages.push({ role: "user", content: `${FLEET_PREFIX} (${new Date().toISOString()}):\n${table}` });
+}
+
 let running = false;
 
 export async function runWake(wakeup: Wakeup): Promise<void> {
@@ -384,6 +451,8 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
     let plan: AgentPlan | null = null;
     // Sized once the fleet is known (round 0) so each ship can get a full job.
     let actionsLeft = config.agent.maxActionsPerWake;
+    // Also sized at round 0: the round cap scales with fleet size like the action budget.
+    let maxRounds = config.agent.maxRoundsPerWake;
     let noCallRounds = 0;
     const runCall = async (call: PlannedCall): Promise<ExecOutcome> => {
       const def = getTool(call.tool);
@@ -411,7 +480,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       return outcome;
     };
 
-    while (round < config.agent.maxRoundsPerWake) {
+    while (round < maxRounds) {
       if (actionsLeft <= 0) {
         endedBy = "action-cap";
         break;
@@ -425,6 +494,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
         try {
           wm = await buildWorkingMemory(wakeup.reason);
           actionsLeft = wm.limits.maxActions;
+          maxRounds = wm.limits.maxRounds;
         } catch (err) {
           activity.append({ kind: "system", text: `working memory refresh failed: ${err instanceof Error ? err.message : err}` });
           endedBy = "error";
@@ -435,15 +505,28 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       } else {
         elideOldToolResults(messages);
       }
-      let response: PlanResponse;
-      try {
-        response = await think(messages);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        runtime.llm.errors++;
-        runtime.llm.lastError = msg;
-        activity.append({ kind: "system", text: `LLM error: ${msg}` });
+      let response: PlanResponse | null = null;
+      let lastLlmError = "";
+      // Timeouts and server errors are retried with the same conversation, so
+      // a slow endpoint costs a pause, not the whole wake's context.
+      for (let attempt = 0; attempt <= config.agent.llmRetries; attempt++) {
+        try {
+          response = await think(messages);
+          break;
+        } catch (err) {
+          lastLlmError = err instanceof Error ? err.message : String(err);
+          runtime.llm.errors++;
+          runtime.llm.lastError = lastLlmError;
+          const retry = attempt < config.agent.llmRetries && isRetryableLlmError(err);
+          activity.append({ kind: "system", text: `LLM error: ${lastLlmError}${retry ? ` — retrying (${attempt + 1}/${config.agent.llmRetries})` : ""}` });
+          if (!retry) break;
+          await new Promise<void>(r => setTimeout(r, LLM_RETRY_BACKOFF_MS[Math.min(attempt, LLM_RETRY_BACKOFF_MS.length - 1)]));
+        }
+      }
+      if (!response) {
         endedBy = "llm-error";
+        // Come back soon rather than waiting for the next ship event or the fallback wake.
+        scheduler.schedule(Date.now() + LLM_FAILURE_REWAKE_MS, `retry after LLM error: ${lastLlmError.slice(0, 120)}`);
         break;
       }
       runtime.llm.calls++;
@@ -515,6 +598,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
         const o = slots[i];
         if (o) messages.push(toolMessageFor(response.calls[i]!.id, o));
       }
+      if (!ended) await appendFleetTable(messages);
       // Only mutating actions consume the action budget; reads and internal
       // tools are free, as are guard-rejected / blocked / local errors, so the
       // agent can gather context and adapt without starving its action slots.

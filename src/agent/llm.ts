@@ -5,7 +5,7 @@ const client = new OpenAI({
   baseURL: config.llm.url,
   apiKey: config.llm.apiKey,
   timeout: config.llm.timeoutMs,
-  maxRetries: 1,
+  maxRetries: 0, // the agent loop retries with backoff (AGENT_LLM_RETRIES)
 });
 
 export interface ToolSpec {
@@ -131,6 +131,14 @@ export function extractReasoning(msg: Record<string, unknown> | undefined): {
     }
   }
   return { content, reasoning: reasoning || null, fields };
+}
+
+/** Timeouts, connection failures, 429 and 5xx are worth another attempt; 4xx request errors are not. */
+export function isRetryableLlmError(err: unknown): boolean {
+  const status = (err as { status?: unknown } | null)?.status;
+  if (typeof status === "number") return status === 408 || status === 409 || status === 429 || status >= 500;
+  const msg = err instanceof Error ? `${err.name} ${err.message}` : String(err);
+  return /time(d)? ?out|timeout|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up|network|fetch failed|Connection error/i.test(msg);
 }
 
 // Lenient fallback for models/endpoints that answer in text instead of tool_calls.

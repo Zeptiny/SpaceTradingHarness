@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { extractReasoning } from "./llm.js";
+import { extractReasoning, isRetryableLlmError } from "./llm.js";
 
 test("reasoning_content is captured and kept for echo", () => {
   const r = extractReasoning({ role: "assistant", content: "Docking NYUU-1.", reasoning_content: "Fuel is low, so dock first." });
@@ -46,4 +46,13 @@ test("plain content without reasoning is untouched", () => {
   assert.equal(r.content, "Nothing to do.");
   assert.equal(r.reasoning, null);
   assert.deepEqual(r.fields, {});
+});
+
+test("isRetryableLlmError: timeouts, 429 and 5xx retry; 4xx don't", () => {
+  assert.equal(isRetryableLlmError(Object.assign(new Error("x"), { status: 429 })), true);
+  assert.equal(isRetryableLlmError(Object.assign(new Error("x"), { status: 503 })), true);
+  assert.equal(isRetryableLlmError(Object.assign(new Error("x"), { status: 400 })), false);
+  assert.equal(isRetryableLlmError(new Error("Request timed out.")), true);
+  assert.equal(isRetryableLlmError(new Error("fetch failed")), true);
+  assert.equal(isRetryableLlmError(new Error("bad json")), false);
 });

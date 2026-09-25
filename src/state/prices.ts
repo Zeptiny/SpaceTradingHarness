@@ -88,6 +88,19 @@ class PriceHistory {
     return out;
   }
 
+  /**
+   * Compact lines for a market priced within maxAgeMs, one per good:
+   * "FOOD IMPORT pay 5034 get 2495 vol 60" (pay = what you pay to buy here,
+   * get = what you get selling here). Null when not priced that recently.
+   */
+  snapshot(waypoint: string, maxAgeMs: number, now = Date.now()): string[] | null {
+    const points = this.latest().filter(p => p.waypoint === waypoint && now - p.ts <= maxAgeMs);
+    if (!points.length) return null;
+    return points
+      .sort((a, b) => a.good.localeCompare(b.good))
+      .map(p => `${p.good} ${p.type ?? "?"} pay ${p.purchasePrice ?? "-"} get ${p.sellPrice ?? "-"} vol ${p.volume ?? "-"}`);
+  }
+
   bestPrices(good: string): { buyFrom: PricePoint | undefined; sellTo: PricePoint | undefined } {
     const points = this.query({ good, limit: PER_KEY });
     // You can only buy where the good is exported/exchanged and sell where it is imported/exchanged.

@@ -146,3 +146,32 @@ function isContractExpired(c: Contract): boolean {
 export function isContractOpen(c: Contract): boolean {
   return !c.fulfilled && !isContractExpired(c);
 }
+
+/**
+ * One line per ship for the live fleet table the loop appends after every
+ * round: where each ship is, what it holds, and when it can act. Keeps the
+ * agent from acting on ships still in flight after older results were trimmed.
+ */
+export function fleetTable(
+  ships: Ship[],
+  routineOf: (ship: string) => { description: string; phase: string } | undefined,
+  now = Date.now(),
+): string {
+  const secs = (iso: string | undefined) => {
+    const t = iso ? Date.parse(iso) : NaN;
+    return Number.isFinite(t) ? Math.max(0, Math.ceil((t - now) / 1000)) : 0;
+  };
+  return ships.map(s => {
+    const frame = (s.frame?.symbol ?? "").replace(/^FRAME_/, "");
+    const where = s.nav.status === "IN_TRANSIT"
+      ? `IN_TRANSIT ${s.nav.route.origin.symbol} → ${s.nav.route.destination.symbol}, arrives in ${secs(s.nav.route.arrival)}s`
+      : `${s.nav.status} @ ${s.nav.waypointSymbol}`;
+    const goods = s.cargo.inventory.filter(i => i.units > 0).map(i => `${i.symbol}:${i.units}`).join(",");
+    const cd = secs(s.cooldown?.expiration);
+    const state = s.nav.status === "IN_TRANSIT" ? "" : cd > 0 ? ` | cooldown ${cd}s` : " | ready";
+    const r = routineOf(s.symbol);
+    const routine = r ? ` | routine: ${r.description} (${r.phase})` : "";
+    const fuel = s.fuel.capacity > 0 ? ` | fuel ${s.fuel.current}/${s.fuel.capacity}` : "";
+    return `${s.symbol} ${frame} | ${where} | cargo ${s.cargo.units}/${s.cargo.capacity}${goods ? ` ${goods}` : ""}${fuel}${state}${routine}`;
+  }).join("\n");
+}
