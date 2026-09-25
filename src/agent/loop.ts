@@ -14,6 +14,7 @@ import { executeTool, type ExecOutcome } from "../tools/executor.js";
 import { scheduler, type Wakeup } from "./scheduler.js";
 import { chat, extractJson, type ChatMessage } from "./llm.js";
 import { compactShip, contractSummary, isContractOpen } from "../state/projections.js";
+import { compactSurvey, surveys } from "../state/surveys.js";
 import { shipyards } from "../state/shipyards.js";
 import { creditHistory } from "../state/credits.js";
 import type { WakeStats } from "../state/summaries.js";
@@ -76,6 +77,7 @@ interface WorkingMemory {
   };
   map: ReturnType<typeof atlas.summary>;
   gates: GateSummary[];
+  surveys: ReturnType<typeof compactSurvey>[];
   fleet: { asOf: string; ships: unknown[] };
   contracts: { asOf: string; items: unknown[]; closedCount: number };
   goals: unknown[];
@@ -190,6 +192,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     },
     map: atlas.summary(fleetSystems),
     gates: atlas.gates(fleetSystems),
+    surveys: surveys.active().map(compactSurvey),
     fleet: {
       asOf: ships ? now : "unavailable",
       ships: (ships ?? []).map(s => ({ state: shipState(s), ...compactShip(s) })),
