@@ -77,6 +77,10 @@ class Transport {
 
     const idempotent = route.method === "GET";
     let attempt = 0;
+    // 429s have their own, larger allowance: the server rejected the request
+    // without running it, so waiting and resending is always safe, and the
+    // agent should only ever see a rate limit as a delay.
+    let limited = 0;
     for (;;) {
       await this.pace();
       const counter = requestCounter.getStore();
@@ -108,15 +112,16 @@ class Transport {
       this.trackRate(res.headers);
       this.rate.lastRequestAt = Date.now();
 
-      if (res.status === 429 || (res.status >= 500 && idempotent)) {
+      if (res.status === 429 && limited++ < config.transport.maxRateLimitRetries) {
         const retryAfter = Number(res.headers.get("retry-after"));
-        if (attempt++ < config.transport.maxRetries) {
-          const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
-            ? Math.min(retryAfter * 1000, config.transport.maxRetryAfterMs)
-            : 750 * attempt;
-          await sleep(waitMs);
-          continue;
-        }
+        await sleep(Number.isFinite(retryAfter) && retryAfter > 0
+          ? Math.min(retryAfter * 1000, config.transport.maxRetryAfterMs)
+          : Math.min(1000 * limited, config.transport.maxRetryAfterMs));
+        continue;
+      }
+      if (res.status >= 500 && idempotent && attempt++ < config.transport.maxRetries) {
+        await sleep(750 * attempt);
+        continue;
       }
 
       const text = await res.text();
