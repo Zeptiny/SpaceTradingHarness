@@ -1,11 +1,20 @@
 import { bus } from "../events/bus.js";
 import { creditHistory } from "./credits.js";
+import { loadJson, saveJsonAtomic } from "./persist.js";
 import type { Agent, Contract, Ship, Waypoint } from "../generated/types.js";
 
 interface Entry {
   value: unknown;
   fetchedAt: number;
 }
+
+// What the panel's System map and Markets page draw from. The agent's own
+// stores keep their data across restarts but the map and markets views read
+// the mirror, which started empty, and a system the atlas has already mapped
+// is never listed again, so the map stayed blank after a restart.
+// Fleet, agent and contracts are left out: the first wake re-reads them.
+const SAVED_PREFIXES = ["system:", "system-waypoints:", "market:", "shipyard:"];
+const SAVE_DELAY_MS = 15_000;
 
 export interface FleetState {
   ships: Ship[];
@@ -20,12 +29,45 @@ export interface FleetState {
  */
 class StateMirror {
   private map = new Map<string, Entry>();
+  private file: string | null = null;
+  private saveTimer: NodeJS.Timeout | null = null;
 
   set<T>(key: string, value: T): T {
     this.map.set(key, { value, fetchedAt: Date.now() });
     this.sweep();
+    if (SAVED_PREFIXES.some(p => key.startsWith(p))) this.scheduleSave();
     bus.emit({ type: "StateChanged", ts: Date.now(), keys: [key] });
     return value;
+  }
+
+  /** Loads the saved map/market entries from `file` (keeping their read times) and saves them there from now on. */
+  restore(file: string): void {
+    this.file = file;
+    const saved = loadJson<Record<string, Entry>>(file, {});
+    for (const [key, e] of Object.entries(saved)) {
+      if (SAVED_PREFIXES.some(p => key.startsWith(p)) && e && typeof e.fetchedAt === "number" && !this.map.has(key)) {
+        this.map.set(key, { value: e.value, fetchedAt: e.fetchedAt });
+      }
+    }
+  }
+
+  private scheduleSave(): void {
+    if (!this.file || this.saveTimer) return;
+    this.saveTimer = setTimeout(() => this.flush(), SAVE_DELAY_MS);
+    this.saveTimer.unref?.();
+  }
+
+  flush(): void {
+    if (this.saveTimer) clearTimeout(this.saveTimer);
+    this.saveTimer = null;
+    if (!this.file) return;
+    const out: Record<string, Entry> = {};
+    for (const [key, e] of this.map) if (SAVED_PREFIXES.some(p => key.startsWith(p))) out[key] = e;
+    try {
+      saveJsonAtomic(this.file, out);
+    } catch (err) {
+      console.error("[mirror] save failed:", err instanceof Error ? err.message : err);
+    }
   }
 
   get<T>(key: string): T | undefined {
@@ -40,6 +82,7 @@ class StateMirror {
   invalidate(prefix: string): void {
     const keys = [...this.map.keys()].filter(k => k.startsWith(prefix));
     for (const k of keys) this.map.delete(k);
+    if (keys.some(k => SAVED_PREFIXES.some(p => k.startsWith(p)))) this.scheduleSave();
     if (keys.length) bus.emit({ type: "StateChanged", ts: Date.now(), keys });
   }
 

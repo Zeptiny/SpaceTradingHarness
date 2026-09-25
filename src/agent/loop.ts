@@ -4,6 +4,10 @@ import { activity } from "../state/activity.js";
 import { memory } from "../state/memory.js";
 import { summaries } from "../state/summaries.js";
 import { checkpointStore, type AgentPlan } from "../state/checkpoint.js";
+import { inflight, type InflightWake } from "../state/inflight.js";
+import { usage } from "../state/usage.js";
+import { resumeArrivals } from "../state/arrivals.js";
+import { dataFile } from "../state/persist.js";
 import { refreshAgent, refreshContracts, refreshFleet, scanShipLocations } from "../state/refresh.js";
 import { atlas, type GateSummary } from "../state/atlas.js";
 import { ledger, type Trend } from "../state/ledger.js";
@@ -123,6 +127,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     }
   }
   if (ships) {
+    resumeArrivals(ships);
     earnings.track(ships.map(s => s.symbol));
     routines.prune(ships.map(s => s.symbol));
     resale.prune(ships.map(s => s.symbol));
@@ -475,9 +480,22 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
   let round = 0;
   const outcomes: ExecOutcome[] = [];
   let wakeId = 0;
+  let lastThought = "";
+  const saveInflight = (): void => inflight.save({
+    wake: wakeId,
+    reason: wakeup.reason,
+    startedAt,
+    round,
+    tokens,
+    requests: runtime.requestsTotal - requestsAtStart,
+    creditsStart,
+    thought: lastThought,
+    actions: outcomes.map(o => ({ tool: o.tool, outcome: o.outcome, summary: o.summary })),
+  });
   try {
-    wakeId = summaries.nextWakeId();
+    wakeId = summaries.nextWakeId(activity.lastWake());
     runtime.wake = { id: wakeId, reason: wakeup.reason, startedAt, round: 0 };
+    saveInflight();
     bus.emit({ type: "AgentWoke", ts: Date.now(), reason: wakeup.reason, scope: wakeup.scope });
     activity.append({ kind: "wake", text: `wake #${wakeId}: ${wakeup.reason} (scope ${wakeup.scope})` });
 
@@ -556,6 +574,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
           lastLlmError = err instanceof Error ? err.message : String(err);
           runtime.llm.errors++;
           runtime.llm.lastError = lastLlmError;
+          usage.llmError();
           const retry = attempt < config.agent.llmRetries && isRetryableLlmError(err);
           activity.append({ kind: "system", text: `LLM error: ${lastLlmError}${retry ? ` — retrying (${attempt + 1}/${config.agent.llmRetries})` : ""}` });
           if (!retry) break;
@@ -572,6 +591,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       runtime.llm.promptTokens += response.usage.prompt;
       runtime.llm.completionTokens += response.usage.completion;
       runtime.llm.cachedTokens += response.usage.cached;
+      usage.llm(response.usage);
       tokens.prompt += response.usage.prompt;
       tokens.completion += response.usage.completion;
       tokens.cached += response.usage.cached;
@@ -580,6 +600,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       if (response.thought.trim() || response.reasoning) {
         activity.append({ kind: "thought", text: response.thought.trim(), reasoning: clipReasoning(response.reasoning) });
       }
+      if (response.thought.trim()) lastThought = response.thought.trim().slice(0, 2_000);
       plan = { thought: response.thought, calls: response.calls.map(c => ({ tool: c.tool, args: c.args })) };
       bus.emit({ type: "PlanUpdated", ts: Date.now(), thought: response.thought, calls: plan.calls });
       if (!response.calls.length) {
@@ -647,6 +668,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       actionsLeft -= spent;
 
       round++;
+      saveInflight();
       if (ended) {
         endedBy = "end_loop";
         break;
@@ -685,6 +707,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       // logging itself failing — nothing more we can do
     }
   } finally {
+    inflight.clear();
     running = false;
     runtime.wake = null;
     runtime.lastWakeEndedAt = Date.now();
@@ -717,7 +740,40 @@ function summarizeWake(outcomes: ExecOutcome[]): string {
   return parts.join(" | ") || "no-op";
 }
 
+/**
+ * Records a wake the previous run left unfinished as a summary, so the panel
+ * lists it and the next wake's recentSummaries tell the agent what it had
+ * already done. Returns a note for the restart wake's reason.
+ */
+function recordInterruptedWake(w: InflightWake): string {
+  const ok = w.actions.filter(a => a.outcome === "ok").map(a => a.summary);
+  const bad = w.actions.filter(a => a.outcome !== "ok").map(a => `${a.tool}(${a.outcome}): ${a.summary}`);
+  const done = [ok.join("; "), bad.length ? `issues: ${bad.join("; ")}` : ""].filter(Boolean).join(" | ") || "no tool calls yet";
+  const text = `cut off by a harness restart after ${w.round} round${w.round === 1 ? "" : "s"}. Done so far: ${done}${w.thought ? `. Last plan: ${w.thought}` : ""}`.slice(0, 4_000);
+  summaries.add({
+    wake: w.wake,
+    reason: w.reason,
+    text,
+    actions: w.actions.map(a => ({ tool: a.tool, outcome: a.outcome })),
+    stats: {
+      startedAt: w.startedAt,
+      durationMs: Math.max(0, (w.savedAt ?? Date.now()) - w.startedAt),
+      rounds: w.round,
+      requests: w.requests,
+      tokens: w.tokens,
+      creditsStart: w.creditsStart,
+      creditsEnd: creditHistory.latest()?.credits ?? w.creditsStart,
+      endedBy: "interrupted",
+    },
+  });
+  activity.append({ kind: "system", text: `wake #${w.wake} was cut off by a harness restart after ${w.round} round(s)` });
+  return `wake #${w.wake} was cut off by a restart (see recentSummaries)`;
+}
+
 export function startAgent(): void {
+  scheduler.restore(dataFile("scheduler.json"));
+  const cut = inflight.take();
+  const cutNote = cut ? recordInterruptedWake(cut) : null;
   scheduler.onWake(w => {
     void runWake(w);
   });
@@ -732,7 +788,7 @@ export function startAgent(): void {
   if (scheduler.paused) {
     console.log("[agent] started PAUSED");
   } else {
-    scheduler.schedule(Date.now() + 1500, "harness start");
+    scheduler.schedule(Date.now() + 1500, cutNote ? `harness restart; ${cutNote}` : "harness start");
   }
   console.log("[agent] started (policy: %s)", config.agent.policy);
 }

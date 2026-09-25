@@ -33,6 +33,7 @@ const { prices } = await import("./state/prices.js");
 const { creditHistory } = await import("./state/credits.js");
 const { checkpointStore } = await import("./state/checkpoint.js");
 const { runtime } = await import("./state/runtime.js");
+const { usage } = await import("./state/usage.js");
 const { mirror, storeKeys, mergeSystemWaypoints, observeAgent, upsertShip } = await import("./state/store.js");
 const { scheduler } = await import("./agent/scheduler.js");
 const { startPanel } = await import("./panel/server.js");
@@ -425,6 +426,7 @@ const scripts: Script[] = [
     const delta = Math.round(rand(-3_000, 5_000));
     const tokens = { prompt: Math.round(rand(9_000, 26_000)), completion: Math.round(rand(300, 1_600)), cached: Math.round(rand(4_000, 9_000)) };
     runtime.llm.calls += 3; runtime.llm.promptTokens += tokens.prompt; runtime.llm.completionTokens += tokens.completion; runtime.llm.cachedTokens += tokens.cached;
+    usage.llm(tokens);
     summaries.add({
       ts,
       reason: reasons[i % reasons.length]!,
@@ -471,6 +473,7 @@ async function playScript(sc: Script, opts: { baseTs?: number; live: boolean }):
   const creditsEnd = creditsStart + sc.creditDelta;
   if (opts.live) {
     runtime.llm.calls += round; runtime.llm.promptTokens += tokens.prompt; runtime.llm.completionTokens += tokens.completion; runtime.llm.cachedTokens += tokens.cached;
+    usage.llm(tokens);
   }
   summaries.add({
     ts,

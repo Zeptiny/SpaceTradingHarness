@@ -36,6 +36,16 @@ export function expectArrival(ship: string, waypoint: string, arrival: string | 
   timers.set(ship, timer);
 }
 
+/**
+ * Arms the arrival read for ships already in transit that have none (their
+ * timer died with the process that sent them, e.g. across a restart).
+ */
+export function resumeArrivals(ships: { symbol: string; nav: { status: string; route: { destination: { symbol: string }; arrival: string } } }[]): void {
+  for (const s of ships) {
+    if (s.nav.status === "IN_TRANSIT" && !timers.has(s.symbol)) expectArrival(s.symbol, s.nav.route.destination.symbol, s.nav.route.arrival);
+  }
+}
+
 export async function readAt(waypoint: string, ship?: string): Promise<{ market: boolean; shipyard: boolean; charted: number | null }> {
   const out = { market: false, shipyard: false, charted: null as number | null };
   if (runtime.paused) return out;
