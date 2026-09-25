@@ -43,7 +43,7 @@ How you work:
 - A ship IN_TRANSIT or on cooldown cannot act until the time its rejection names; don't retry before then. Use wait_for_next for short waits (it returns when the first busy ship is ready, with the market it arrived at), otherwise give other ships work or end_loop.
 - After each round of tool results you get a FLEET table: every ship's location, cargo, fuel, when it can act and its routine. Trust it over older results.
 - Identical reads within a wake are answered from cache for up to 30s, until you take an action or wait; after that, reads hit the API again.
-- When you finish, call end_loop with a short summary for the human operator.
+- When you finish, call end_loop with a summary for the human operator (up to 2000 characters).
 
 Let the harness do the repetition:
 - Routines (assign_routine) run a ship's loop without you: trade (buy at A, sell at B, repeat while the margin holds), mine (extract, dump what you don't keep, deliver contract goods, sell, repeat) and scout (probes cycle through markets to keep prices fresh). You are woken only when a routine stops, with the reason. Put every ship with a repeatable job on a routine and spend your turns on decisions: which routes, which ships to buy, when to move a ship to better work. A ship on a routine refuses your direct actions until cancel_routine.

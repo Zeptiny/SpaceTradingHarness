@@ -393,7 +393,7 @@ textarea.field { height: auto; padding: 9px 11px; resize: vertical; line-height:
 .wake-row:hover { background: rgba(255, 255, 255, 0.02); }
 .wake-id { font: 600 13px/1.2 var(--font-mono); color: var(--text-2); }
 .wake-id small { display: block; color: var(--muted); font-weight: 400; font-size: 11px; margin-top: 3px; }
-.wake-text { font-size: 13.5px; line-height: 1.45; }
+.wake-text { font-size: 13.5px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .wake-reason { color: var(--muted); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wake-stats { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; font: 500 11.5px/1.2 var(--font-mono); color: var(--muted); white-space: nowrap; }
 
