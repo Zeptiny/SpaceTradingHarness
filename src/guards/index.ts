@@ -79,8 +79,16 @@ export const notInTransit: Guard = async (_name, ctx) => {
 export const cooldownClear: Guard = async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;
-  if (r.ship.cooldown && r.ship.cooldown.remainingSeconds > 0) {
-    return { ok: false, reason: `${r.symbol} cooling down ${r.ship.cooldown.remainingSeconds}s` };
+  // remainingSeconds is computed by the server at fetch time, so no local
+  // clock is involved. Survey, extract, siphon, refine, scan and jump all
+  // share this one reactor cooldown.
+  const cd = r.ship.cooldown;
+  if (cd && cd.remainingSeconds > 0) {
+    const until = cd.expiration ? ` (until ${cd.expiration})` : "";
+    return {
+      ok: false,
+      reason: `${r.symbol} on cooldown ${cd.remainingSeconds}s more${until}; survey/extract/siphon/refine/scan/jump share it and the harness auto-wakes when it ends, so work other ships meanwhile`,
+    };
   }
   return { ok: true };
 };

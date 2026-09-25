@@ -8,7 +8,7 @@ import {
 } from "../guards/index.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
 import { config } from "../config.js";
-import { cooldownWakeAt, etaWakeAt } from "../utils/time.js";
+import { cooldownNote, cooldownWakeAt, etaWakeAt } from "../utils/time.js";
 import { compactCargo, compactShip } from "../state/projections.js";
 import { ledger } from "../state/ledger.js";
 import { ShipTypeValues, type ShipNavFlightMode } from "../generated/types.js";
@@ -101,7 +101,7 @@ registerTool({
     const { data } = await api.extract(shipSymbol);
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
     return {
-      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol}, cargo ${data.cargo.units}/${data.cargo.capacity}`,
+      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol}, cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}`,
       result: { extraction: data.extraction, cooldown: data.cooldown, cargo: data.cargo },
       followUpWakeAt: cooldownWakeAt(data.cooldown),
       followUpReason: `${shipSymbol} extraction cooldown done`,
@@ -122,7 +122,7 @@ registerTool({
     const { data } = await api.siphon(shipSymbol);
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
     return {
-      summary: `${shipSymbol} siphoned ${data.siphon.yield.units}x ${data.siphon.yield.symbol}`,
+      summary: `${shipSymbol} siphoned ${data.siphon.yield.units}x ${data.siphon.yield.symbol}${cooldownNote(data.cooldown)}`,
       result: { siphon: data.siphon, cooldown: data.cooldown, cargo: data.cargo },
       followUpWakeAt: cooldownWakeAt(data.cooldown),
       followUpReason: `${shipSymbol} siphon cooldown done`,

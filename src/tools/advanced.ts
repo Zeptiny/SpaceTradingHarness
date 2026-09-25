@@ -7,7 +7,7 @@ import {
   cargoHasGood, cooldownClear, inOrbit, isDocked, knownShip,
   notInTransit, shipHasModule, shipHasMount, waypointHasTrait,
 } from "../guards/index.js";
-import { cooldownWakeAt } from "../utils/time.js";
+import { cooldownNote, cooldownWakeAt } from "../utils/time.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
 import type { Survey } from "../generated/types.js";
 
@@ -58,7 +58,7 @@ registerTool({
 
 registerTool({
   name: "create_survey",
-  description: "Survey current waypoint for richer extraction yields (needs SURVEYOR mount; auto-orbits if docked). Returns surveys usable by extract_with_survey.",
+  description: "Survey current waypoint for richer extraction yields (needs SURVEYOR mount; auto-orbits if docked). Returns surveys usable by extract_with_survey. Starts the ship's cooldown, so the same ship cannot extract until it ends (harness auto-wakes); survey with one ship and extract with another to avoid waiting.",
   kind: "action",
   input: z.object({ shipSymbol: z.string() }),
   guards: [knownShip, notInTransit, cooldownClear, shipHasMount("MOUNT_SURVEYOR")],
@@ -70,7 +70,7 @@ registerTool({
     if (ship && data.cooldown) upsertShip({ ...ship, cooldown: data.cooldown });
     const surveys = data.surveys ?? [];
     return {
-      summary: `${shipSymbol} surveyed ${surveys.length} deposits (${surveys.map(s => s.symbol).join(", ")})`,
+      summary: `${shipSymbol} surveyed ${surveys.length} deposits (${surveys.map(s => s.symbol).join(", ")})${cooldownNote(data.cooldown)}`,
       result: surveys,
       followUpWakeAt: cooldownWakeAt(data.cooldown),
       followUpReason: `${shipSymbol} survey cooldown done`,
@@ -91,7 +91,7 @@ registerTool({
     const { data } = await api.extractWithSurvey(shipSymbol, survey as Survey);
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
     return {
-      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol} (surveyed)`,
+      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol} (surveyed), cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}`,
       result: data,
       followUpWakeAt: cooldownWakeAt(data.cooldown),
       followUpReason: `${shipSymbol} extraction cooldown done`,
