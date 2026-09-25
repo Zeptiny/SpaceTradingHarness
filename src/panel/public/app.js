@@ -77,6 +77,7 @@ const ICON = {
   fleet: '<path d="M12 2.5c2.8 2.6 4 5.6 4 9.5v5l-4 3-4-3v-5c0-3.9 1.2-6.9 4-9.5z"/><path d="M8 13l-3.5 2.6V19L8 17.6M16 13l3.5 2.6V19L16 17.6"/><circle cx="12" cy="10" r="1.6"/>',
   activity: '<path d="M3 12h4l3-8 4 16 3-8h4"/>',
   map: '<circle cx="12" cy="12" r="2.6"/><ellipse cx="12" cy="12" rx="10" ry="4.4" transform="rotate(-24 12 12)"/><circle cx="20.2" cy="8.2" r="1.1"/>',
+  galaxy: '<circle cx="12" cy="12" r="1.8"/><path d="M12 4.5c4.6 0 7.5 3 7.5 6.2 0 2.8-2.3 4.8-5 4.8"/><path d="M12 19.5c-4.6 0-7.5-3-7.5-6.2 0-2.8 2.3-4.8 5-4.8"/><circle cx="19" cy="5" r=".9"/><circle cx="5" cy="19" r=".9"/>',
   markets: '<path d="M3 20h18M6 16v-5M11 16V6M16 16v-8M21 16v-3"/>',
   contracts: '<path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M10 13h6M10 17h4"/>',
   memory: '<path d="M6 3h12v18l-6-4-6 4z"/><path d="M10 8h4"/>',
@@ -130,13 +131,14 @@ function toast(msg, bad = false) {
 
 const S = {
   state: null, wakes: [], activity: [], wakeLog: new Map(), credits: [],
-  markets: [], universe: null, memory: null, tools: null, history: new Map(),
+  markets: [], universe: null, galaxy: null, galaxyAt: 0, memory: null, tools: null, history: new Map(),
 };
 const UI = {
   view: "overview", conn: "connecting", lastEventAt: 0,
   selWake: null, logQuery: "", logIssues: false, openCalls: new Set(),
   fleetFilter: "", creditRange: 24,
   mapSystem: null, mapSel: null, mapView: null,
+  galView: null, galSel: null, galHover: null,
   marketTab: "opps", marketSel: null, marketQuery: "",
   noteKind: "", noteQuery: "", toolQuery: "", openTools: new Set(),
 };
@@ -161,6 +163,13 @@ const LOADERS = {
   credits: async () => { S.credits = await api(`/api/credits?since=${Date.now() - 7 * 86_400_000}`); },
   markets: async () => { S.markets = await api("/api/markets"); },
   universe: async () => { S.universe = await api("/api/universe"); },
+  // The system list is big and fixed per reset: fetch it once, and while the
+  // collector is still filling it, at most every 30s.
+  galaxy: async () => {
+    if (S.galaxy?.complete || Date.now() - S.galaxyAt < 30_000) return;
+    S.galaxyAt = Date.now();
+    S.galaxy = await api("/api/galaxy");
+  },
   memory: async () => { S.memory = await api("/api/memory"); },
   tools: async () => { if (!S.tools) S.tools = await api("/api/tools"); },
   history: async () => {
@@ -377,7 +386,7 @@ function wakeStatsTags(w) {
 // ================================================================ chrome
 
 const NAV = [
-  ["overview", "Overview"], ["fleet", "Fleet"], ["activity", "Activity"], ["map", "Map"],
+  ["overview", "Overview"], ["fleet", "Fleet"], ["activity", "Activity"], ["galaxy", "Galaxy"], ["map", "System"],
   ["markets", "Markets"], ["contracts", "Contracts"], ["memory", "Memory"], ["agent", "Agent"],
 ];
 
@@ -722,7 +731,8 @@ VIEWS.map = {
     const sel = $("#sysSelect");
     const systems = u?.systems ?? [];
     if (!UI.mapSystem) UI.mapSystem = ships()[0]?.nav?.system ?? systems[0]?.symbol ?? null;
-    patch(sel, systems.map(s => `<option ${s.symbol === UI.mapSystem ? "selected" : ""}>${esc(s.symbol)}</option>`).join("") || "<option>no systems cached</option>");
+    const listed = UI.mapSystem && !systems.some(s => s.symbol === UI.mapSystem) ? [...systems, { symbol: UI.mapSystem }] : systems;
+    patch(sel, listed.map(s => `<option ${s.symbol === UI.mapSystem ? "selected" : ""}>${esc(s.symbol)}</option>`).join("") || "<option>no systems cached</option>");
     if (UI.mapSystem && sel.value !== UI.mapSystem) sel.value = UI.mapSystem;
     renderMap();
     renderMapDetail();
@@ -899,6 +909,381 @@ function selectWp(sym) {
   UI.mapSel = sym || null;
   renderMap();
   renderMapDetail();
+}
+
+// ---------------------------------------------------------------- galaxy
+// Thousands of systems: the star field is drawn on a canvas (one bitmap, no
+// DOM churn, so live updates cannot flicker it); the side panel goes through
+// patch() like every other view.
+const STAR = {
+  NEUTRON_STAR: { color: "#b9c8ff", r: 1.1, label: "neutron star" },
+  RED_STAR: { color: "#ff6f5e", r: 1.3, label: "red star" },
+  ORANGE_STAR: { color: "#ffa24a", r: 1.4, label: "orange star" },
+  BLUE_STAR: { color: "#6fa8ff", r: 1.6, label: "blue star" },
+  YOUNG_STAR: { color: "#fff1a6", r: 1.5, label: "young star" },
+  WHITE_DWARF: { color: "#e9edf5", r: 1.0, label: "white dwarf" },
+  BLACK_HOLE: { color: "#a07bff", r: 1.7, label: "black hole", ring: true },
+  HYPERGIANT: { color: "#ffd27a", r: 2.2, label: "hypergiant" },
+  NEBULA: { color: "#d38cff", r: 2.6, label: "nebula", soft: true },
+  UNSTABLE: { color: "#ff5fa8", r: 1.5, label: "unstable" },
+};
+const starStyle = t => STAR[t] ?? { color: "#8b95a7", r: 1.2, label: title(t) };
+const sysOf = wp => String(wp ?? "").split("-").slice(0, 2).join("-");
+const sysShort = s => String(s ?? "").split("-")[1] ?? String(s ?? "");
+const GAL_COLORS = { fleet: "#f7a531", gate: "#43d392", known: "#53d3f5", sel: "#e6e9ef", label: "#a4aebe" };
+
+VIEWS.galaxy = {
+  needs: ["universe", "galaxy"],
+  mount() {
+    view().innerHTML = head("Galaxy", "Every system by position and star type. Fleet systems ringed in amber, known jump links in green. Drag to pan, scroll to zoom, double-click a system to open its map.",
+      '<input class="field" id="galSearch" placeholder="Find system…" autocomplete="off" spellcheck="false" style="width:180px">') +
+      `<div class="map-layout mount"><section class="panel map-stage" id="galStage"><canvas id="galCanvas" role="img" aria-label="Galaxy map"></canvas>
+        <div class="empty" id="galEmpty" hidden style="position:absolute;inset:40% 0 auto"></div>
+        <div class="map-hud"><button class="btn btn-sm" data-act="gal-fit">Whole galaxy</button><button class="btn btn-sm" data-act="gal-fleet">Fleet</button><button class="btn btn-sm" data-act="gal-zoom" data-f="1.6" aria-label="Zoom in">+</button><button class="btn btn-sm" data-act="gal-zoom" data-f="0.625" aria-label="Zoom out">−</button></div>
+        <div class="map-legend" id="galLegend"></div><div class="gal-status" id="galStatus"></div></section>
+        <section class="panel" id="galDetail"></section></div>`;
+    $("#galLegend").innerHTML = Object.entries(STAR).map(([, s]) => `<span><i class="star-dot" style="background:${s.color}"></i>${s.label}</span>`).join("") +
+      `<span><i class="star-dot ring" style="border-color:${GAL_COLORS.fleet}"></i>fleet</span><span><i class="star-line" style="background:${GAL_COLORS.gate}"></i>jump link</span>`;
+    $("#galSearch").addEventListener("keydown", e => {
+      if (e.key !== "Enter") return;
+      const q = e.target.value.trim().toUpperCase();
+      if (!q) return;
+      const { rows } = galaxyModel();
+      const hit = rows.find(r => r[0] === q) ?? rows.find(r => r[0].endsWith(`-${q}`)) ?? rows.find(r => r[0].includes(q));
+      if (!hit) { toast(`No system matches ${q}`, true); return; }
+      galSelect(hit[0], true);
+    });
+    bindGalaxyInteractions();
+  },
+  update() {
+    drawGalaxy();
+    renderGalaxyDetail();
+  },
+};
+
+let galCache = { src: null, model: null };
+function galaxyModel() {
+  const src = S.galaxy;
+  if (galCache.src === src && galCache.model) return galCache.model;
+  const rows = src?.systems ?? [];
+  const bySym = new Map(rows.map(r => [r[0], r]));
+  const byType = new Map();
+  for (const r of rows) (byType.get(r[3]) ?? byType.set(r[3], []).get(r[3])).push(r);
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const r of rows) { minX = Math.min(minX, r[1]); maxX = Math.max(maxX, r[1]); minY = Math.min(minY, -r[2]); maxY = Math.max(maxY, -r[2]); }
+  galCache = { src, model: { rows, bySym, byType, bounds: rows.length ? { minX, maxX, minY, maxY } : null } };
+  return galCache.model;
+}
+
+/** Fleet presence per system: ships parked or cruising inside it, and ships jumping/warping between systems. */
+function galaxyFleet() {
+  const at = new Map(), moving = [];
+  for (const s of ships()) {
+    const r = s.nav?.route;
+    if (r && !arrivedStale(s) && sysOf(r.from) !== sysOf(r.to)) { moving.push({ s, from: sysOf(r.from), to: sysOf(r.to), t0: parseTs(r.departed), t1: parseTs(r.arrival) }); continue; }
+    const sys = s.nav?.system ?? sysOf(s.nav?.waypoint);
+    (at.get(sys) ?? at.set(sys, []).get(sys)).push(s);
+  }
+  return { at, moving };
+}
+
+function galFit(bounds, pw, ph, pad = 1.12) {
+  const w = Math.max(20, (bounds.maxX - bounds.minX) * pad), h = Math.max(20, (bounds.maxY - bounds.minY) * pad);
+  return { cx: (bounds.minX + bounds.maxX) / 2, cy: (bounds.minY + bounds.maxY) / 2, scale: Math.min(pw / w, ph / h) };
+}
+
+function galSize() {
+  const c = $("#galCanvas");
+  return c ? { w: c.clientWidth || 800, h: c.clientHeight || 600 } : { w: 800, h: 600 };
+}
+
+function galEnsureView() {
+  const { bounds } = galaxyModel();
+  if (!bounds) return null;
+  const { w, h } = galSize();
+  const fit = galFit(bounds, w, h);
+  if (!UI.galView) UI.galView = { ...fit };
+  UI.galView.min = fit.scale * 0.5;
+  UI.galView.max = fit.scale * 3000;
+  return UI.galView;
+}
+
+function galZoomTo(v, scale, fx, fy) {
+  // keep the world point under (fx, fy) screen px fixed while zooming
+  const { w, h } = galSize();
+  const ns = Math.max(v.min, Math.min(v.max, scale));
+  const wx = v.cx + (fx - w / 2) / v.scale, wy = v.cy + (fy - h / 2) / v.scale;
+  v.cx = wx - (fx - w / 2) / ns; v.cy = wy - (fy - h / 2) / ns; v.scale = ns;
+}
+
+let galRaf = 0;
+const galRedraw = () => { if (!galRaf) galRaf = requestAnimationFrame(() => { galRaf = 0; drawGalaxy(); }); };
+
+function drawGalaxy() {
+  const canvas = $("#galCanvas");
+  if (!canvas) return;
+  const { rows, bySym, byType } = galaxyModel();
+  const st = S.universe?.galaxy;
+  const emptyEl = $("#galEmpty");
+  emptyEl.hidden = rows.length > 0;
+  if (!rows.length) patch(emptyEl, st && !st.complete
+    ? `Loading the galaxy…<br><span class="muted">${st.count ? `${esc(fmtInt(st.count))} of ${esc(fmtInt(st.total))} systems so far · ` : ""}it is read while the agent sleeps</span>`
+    : 'No systems cached yet.<br><span class="muted">The system list is fetched once, in the background, while the agent sleeps.</span>');
+  patch($("#galStatus"), st && !st.complete && rows.length ? `<span class="tag small">loading ${esc(fmtInt(st.count))} / ${st.total ? esc(fmtInt(st.total)) : "?"} systems</span>` : "");
+
+  const dpr = window.devicePixelRatio || 1;
+  const { w, h } = galSize();
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const v = galEnsureView();
+  if (!v) return;
+  const X = x => (x - v.cx) * v.scale + w / 2, Y = y => (-y - v.cy) * v.scale + h / 2;
+  const on = (sx, sy, m = 40) => sx > -m && sx < w + m && sy > -m && sy < h + m;
+  const zoom = Math.max(0.7, Math.min(3.2, 0.8 + 0.35 * Math.log2(v.scale / (v.min * 2))));
+
+  // jump links under everything
+  const links = S.universe?.gateLinks ?? [];
+  ctx.lineWidth = 1.2; ctx.strokeStyle = GAL_COLORS.gate; ctx.globalAlpha = 0.55;
+  ctx.beginPath();
+  for (const [a, b] of links) {
+    const ra = bySym.get(a), rb = bySym.get(b);
+    if (!ra || !rb) continue;
+    ctx.moveTo(X(ra[1]), Y(ra[2])); ctx.lineTo(X(rb[1]), Y(rb[2]));
+  }
+  ctx.stroke();
+
+  // stars, one fillStyle per type
+  let visible = 0;
+  for (const [type, list] of byType) {
+    const s = starStyle(type);
+    const r = s.r * zoom;
+    ctx.fillStyle = s.color;
+    ctx.globalAlpha = s.soft ? 0.45 : 0.9;
+    for (const row of list) {
+      const sx = X(row[1]), sy = Y(row[2]);
+      if (!on(sx, sy, 10)) continue;
+      visible++;
+      if (r < 1.3) { ctx.fillRect(sx - r, sy - r, r * 2, r * 2); continue; }
+      ctx.beginPath(); ctx.arc(sx, sy, r, 0, 6.2832); ctx.fill();
+      if (s.ring && zoom >= 1.5) { ctx.strokeStyle = s.color; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(sx, sy, r + 2.2, 0, 6.2832); ctx.stroke(); }
+    }
+  }
+  ctx.globalAlpha = 1;
+
+  // systems the harness has read: small cyan tick ring
+  const intel = S.universe?.intel ?? {};
+  ctx.strokeStyle = GAL_COLORS.known; ctx.lineWidth = 1; ctx.globalAlpha = 0.7;
+  for (const sym of Object.keys(intel)) {
+    const row = bySym.get(sym);
+    if (!row) continue;
+    const sx = X(row[1]), sy = Y(row[2]);
+    if (!on(sx, sy)) continue;
+    ctx.beginPath(); ctx.arc(sx, sy, 4 + zoom * 1.5, 0, 6.2832); ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  // labels when zoomed in far enough that they fit
+  ctx.font = "500 10px 'IBM Plex Mono', ui-monospace, monospace";
+  ctx.textBaseline = "middle";
+  const { at, moving } = galaxyFleet();
+  if (visible <= 220) {
+    ctx.fillStyle = GAL_COLORS.label; ctx.globalAlpha = 0.8;
+    for (const row of rows) {
+      if (at.has(row[0]) || row[0] === UI.galSel) continue; // those get their own label below
+      const sx = X(row[1]), sy = Y(row[2]);
+      if (on(sx, sy, 0)) ctx.fillText(sysShort(row[0]), sx + 5 + zoom, sy);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // text with a dark halo so it stays readable over dense star fields
+  const label = (text, x, y, color) => {
+    ctx.lineWidth = 3; ctx.strokeStyle = "#07090d"; ctx.strokeText(text, x, y);
+    ctx.fillStyle = color; ctx.fillText(text, x, y);
+  };
+  // fleet systems: amber ring, ship count; HQ gets a second ring
+  const hq = S.state?.agent?.headquarters ? sysOf(S.state.agent.headquarters) : null;
+  ctx.font = "600 11px 'IBM Plex Mono', ui-monospace, monospace";
+  const ring = (sym, color, rad, width = 2) => {
+    const row = bySym.get(sym);
+    if (!row) return null;
+    const sx = X(row[1]), sy = Y(row[2]);
+    ctx.strokeStyle = color; ctx.lineWidth = width;
+    ctx.beginPath(); ctx.arc(sx, sy, rad, 0, 6.2832); ctx.stroke();
+    return [sx, sy];
+  };
+  if (hq) ring(hq, GAL_COLORS.fleet, 13, 1);
+  for (const [sym, list] of at) {
+    const p = ring(sym, GAL_COLORS.fleet, 9, 2);
+    if (!p) continue;
+    label(`${sysShort(sym)} · ${list.length} ship${list.length === 1 ? "" : "s"}`, p[0] + 15, p[1] - 9, GAL_COLORS.fleet);
+  }
+
+  // ships jumping or warping between systems ride their route
+  const now = Date.now();
+  for (const m of moving) {
+    const a = bySym.get(m.from), b = bySym.get(m.to);
+    if (!a || !b) continue;
+    const ax = X(a[1]), ay = Y(a[2]), bx = X(b[1]), by = Y(b[2]);
+    ctx.setLineDash([4, 4]); ctx.strokeStyle = "#53d3f5"; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke(); ctx.setLineDash([]);
+    const f = Math.max(0, Math.min(1, (now - m.t0) / (m.t1 - m.t0 || 1)));
+    const sx = ax + (bx - ax) * f, sy = ay + (by - ay) * f, ang = Math.atan2(by - ay, bx - ax);
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(ang);
+    ctx.fillStyle = "#53d3f5"; ctx.beginPath(); ctx.moveTo(7, 0); ctx.lineTo(-5, 4.5); ctx.lineTo(-2.5, 0); ctx.lineTo(-5, -4.5); ctx.closePath(); ctx.fill();
+    ctx.restore();
+    label(m.s.symbol.split("-").pop(), sx + 8, sy - 9, "#53d3f5");
+  }
+
+  // hover and selection on top
+  for (const [sym, color, rad] of [[UI.galHover, GAL_COLORS.label, 7], [UI.galSel, GAL_COLORS.sel, 11]]) {
+    if (!sym || (rad === 7 && sym === UI.galSel)) continue;
+    const p = ring(sym, color, rad, 1.5);
+    if (!p) continue;
+    const row = bySym.get(sym);
+    label(`${sym} · ${starStyle(row[3]).label}`, p[0] + rad + 5, p[1] + rad + 6, GAL_COLORS.sel);
+  }
+}
+
+function renderGalaxyDetail() {
+  const box = $("#galDetail");
+  if (!box) return;
+  const { bySym, rows } = galaxyModel();
+  const { at, moving } = galaxyFleet();
+  const intel = S.universe?.intel ?? {};
+  const links = S.universe?.gateLinks ?? [];
+  const st = S.universe?.galaxy;
+  const sel = UI.galSel && bySym.get(UI.galSel);
+  const sysLink = (sym, extra = "") => `<a href="#/galaxy" class="mono" data-act="gal-select" data-sys="${esc(sym)}">${esc(sym)}</a>${extra}`;
+  if (!sel) {
+    const fleetSystems = [...at.entries()].sort((a, b) => b[1].length - a[1].length);
+    const source = st?.complete ? (st.source === "dump" ? "bulk dump" : "system list") : "loading";
+    patch(box, `<header class="panel-head"><h2 class="panel-title">Fleet systems</h2><div class="panel-aside">select a system for detail</div></header>
+      <div class="panel-body flush">${fleetSystems.map(([sym, list]) =>
+        `<div class="sched" style="grid-template-columns:minmax(0,1fr) auto;cursor:pointer" data-act="gal-select" data-sys="${esc(sym)}"><span class="mono">${esc(sym)}</span><span class="dim" style="font-size:12px">${list.length} ship${list.length === 1 ? "" : "s"}</span></div>`).join("")}
+        ${moving.map(m => `<div class="sched" style="grid-template-columns:minmax(0,1fr) auto"><span class="mono" style="font-size:12px">${esc(m.s.symbol)} <span class="dim">${esc(sysShort(m.from))} → ${esc(sysShort(m.to))}</span></span><b class="mono" style="font-size:12px" data-cd="${m.t1}">${esc(fmtCountdown(m.t1))}</b></div>`).join("")}
+        ${fleetSystems.length || moving.length ? "" : empty("No ships yet.")}</div>
+      <div class="panel-body dim" style="border-top:1px solid var(--line);font-size:12.5px">${esc(fmtInt(rows.length))} systems${st?.total && !st.complete ? ` of ${esc(fmtInt(st.total))}` : ""} · ${esc(source)} · ${esc(fmtInt(Object.keys(intel).length))} read by the harness · ${esc(fmtInt(links.length))} jump links known</div>`);
+    return;
+  }
+  const [sym, x, y, type, wpCount, factions] = sel;
+  const info = intel[sym];
+  const here = at.get(sym) ?? [];
+  const inbound = moving.filter(m => m.to === sym);
+  const neighbors = links.filter(l => l.includes(sym)).map(l => (l[0] === sym ? l[1] : l[0]));
+  const dist = (a, b) => (a && b ? Math.round(Math.hypot(a[1] - b[1], a[2] - b[2])) : null);
+  const hq = S.state?.agent?.headquarters ? bySym.get(sysOf(S.state.agent.headquarters)) : null;
+  const nearestFleet = [...at.keys()].filter(s => s !== sym).map(s => [s, dist(sel, bySym.get(s))]).filter(([, d]) => d !== null).sort((a, b) => a[1] - b[1])[0];
+  const cached = !!S.universe?.waypointsBySystem?.[sym]?.length;
+  patch(box, `<header class="panel-head"><h2 class="panel-title">${esc(sym)}</h2><div class="panel-aside"><button class="btn btn-sm btn-ghost" data-act="gal-select" data-sys="">close</button></div></header>
+    <div class="panel-body detail-list">
+      <div><div style="font-size:13px"><i class="star-dot" style="background:${starStyle(type).color}"></i> ${esc(starStyle(type).label)}</div><div class="dim" style="font-size:12.5px">(${esc(fmtInt(x))}, ${esc(fmtInt(y))}) · ${esc(wpCount)} waypoints${factions ? ` · ${esc(factions.split(",").map(title).join(", "))}` : ""}</div></div>
+      <div class="detail-row"><div class="k">Distance</div><div style="font-size:12.5px">${hq && hq !== sel ? `${esc(fmtInt(dist(sel, hq)))} from HQ ${esc(sysShort(hq[0]))}` : hq === sel ? "headquarters system" : "–"}${nearestFleet ? `<br>${esc(fmtInt(nearestFleet[1]))} from ${esc(sysShort(nearestFleet[0]))} (fleet)` : ""}</div></div>
+      <div class="detail-row"><div class="k">Harness knows</div><div style="font-size:12.5px">${info ? `${info.mapped ? "fully mapped" : info.scouted ? "scouted for shipyards and markets" : "system record only"}${info.markets || info.shipyards ? ` · ${info.markets} market${info.markets === 1 ? "" : "s"}, ${info.shipyards} shipyard${info.shipyards === 1 ? "" : "s"}` : ""}${info.gate ? " · has a jump gate" : ""}` : '<span class="muted">not read yet</span>'}</div></div>
+      <div class="detail-row"><div class="k">Jump links</div>${neighbors.length ? `<div class="chips">${neighbors.map(n => `<span class="tag">${sysLink(n)}</span>`).join("")}</div>` : '<span class="muted" style="font-size:12.5px">none known</span>'}</div>
+      <div class="detail-row"><div class="k">Ships here</div>${here.length || inbound.length ? `<div class="chips">${here.map(s => `<span class="tag">${esc(s.symbol)}</span>`).join("")}${inbound.map(m => `<span class="tag">${esc(m.s.symbol)} <b data-cd="${m.t1}">${esc(fmtCountdown(m.t1))}</b></span>`).join("")}</div>` : '<span class="muted" style="font-size:12.5px">none</span>'}</div>
+      <div><button class="btn btn-sm" data-act="gal-open" data-sys="${esc(sym)}">Open system map</button>${cached ? "" : '<div class="muted" style="font-size:12px;margin-top:6px">No waypoints cached for it yet; the map fills in once a ship or the collector reads them.</div>'}</div>
+    </div>`);
+}
+
+function galSelect(sym, center = false) {
+  UI.galSel = sym || null;
+  if (center && sym) {
+    const row = galaxyModel().bySym.get(sym);
+    const v = galEnsureView();
+    if (row && v) { v.cx = row[1]; v.cy = -row[2]; v.scale = Math.max(v.scale, v.min * 60); }
+  }
+  drawGalaxy();
+  renderGalaxyDetail();
+}
+
+/** Frames the fleet's systems with their neighborhood: known jump links and the nearest dozen systems around each. */
+function galFleetView() {
+  const { bySym, rows } = galaxyModel();
+  const v = galEnsureView();
+  if (!v) return;
+  const { at, moving } = galaxyFleet();
+  const home = new Set([...at.keys(), ...moving.flatMap(m => [m.from, m.to])]);
+  const pts = [];
+  for (const sym of home) {
+    const c = bySym.get(sym);
+    if (!c) continue;
+    pts.push(c);
+    const near = rows.map(r => [r, (r[1] - c[1]) ** 2 + (r[2] - c[2]) ** 2]).sort((a, b) => a[1] - b[1]).slice(1, 13);
+    pts.push(...near.map(([r]) => r));
+  }
+  for (const [a, b] of S.universe?.gateLinks ?? []) if (home.has(a) || home.has(b)) pts.push(bySym.get(a), bySym.get(b));
+  const list = pts.filter(Boolean);
+  if (!list.length) return;
+  const xs = list.map(r => r[1]), ys = list.map(r => -r[2]);
+  const { w, h } = galSize();
+  Object.assign(v, galFit({ minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) }, w, h, 1.2));
+  v.scale = Math.max(v.min, Math.min(v.max, v.scale));
+  drawGalaxy();
+}
+
+function galHit(clientX, clientY, maxPx = 12) {
+  const canvas = $("#galCanvas");
+  const v = UI.galView;
+  if (!canvas || !v) return null;
+  const r = canvas.getBoundingClientRect();
+  const mx = clientX - r.left, my = clientY - r.top;
+  let best = null, bestD = maxPx * maxPx;
+  for (const row of galaxyModel().rows) {
+    const dx = (row[1] - v.cx) * v.scale + r.width / 2 - mx, dy = (-row[2] - v.cy) * v.scale + r.height / 2 - my;
+    const d = dx * dx + dy * dy;
+    if (d < bestD) { bestD = d; best = row[0]; }
+  }
+  return best;
+}
+
+function bindGalaxyInteractions() {
+  const c = $("#galCanvas");
+  if (!c || c.dataset.bound) return;
+  c.dataset.bound = "1";
+  let drag = null;
+  c.addEventListener("pointerdown", e => {
+    if (!UI.galView) return;
+    drag = { x: e.clientX, y: e.clientY, cx: UI.galView.cx, cy: UI.galView.cy, moved: false };
+    c.setPointerCapture(e.pointerId);
+  });
+  c.addEventListener("pointermove", e => {
+    if (!drag) {
+      const hit = galHit(e.clientX, e.clientY);
+      if (hit !== UI.galHover) { UI.galHover = hit; c.style.cursor = hit ? "pointer" : ""; galRedraw(); }
+      return;
+    }
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) { drag.moved = true; c.classList.add("dragging"); }
+    if (!drag.moved) return;
+    UI.galView.cx = drag.cx - dx / UI.galView.scale;
+    UI.galView.cy = drag.cy - dy / UI.galView.scale;
+    galRedraw();
+  });
+  c.addEventListener("pointerup", e => {
+    if (!drag) return;
+    const wasDrag = drag.moved;
+    drag = null;
+    c.classList.remove("dragging");
+    if (!wasDrag) galSelect(galHit(e.clientX, e.clientY));
+  });
+  c.addEventListener("pointercancel", () => { drag = null; c.classList.remove("dragging"); });
+  c.addEventListener("pointerleave", () => { if (UI.galHover) { UI.galHover = null; galRedraw(); } });
+  c.addEventListener("dblclick", e => { const hit = galHit(e.clientX, e.clientY); if (hit) openSystemMap(hit); });
+  c.addEventListener("wheel", e => {
+    if (!UI.galView) return;
+    e.preventDefault();
+    const r = c.getBoundingClientRect();
+    galZoomTo(UI.galView, UI.galView.scale * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
+    galRedraw();
+  }, { passive: false });
+}
+
+function openSystemMap(sym) {
+  UI.mapSystem = sym; UI.mapView = null; UI.mapSel = null;
+  location.hash = "#/map";
 }
 
 // ---------------------------------------------------------------- markets
@@ -1159,6 +1544,11 @@ document.addEventListener("click", async e => {
     }
     case "select-wp": if (!el.closest("#mapSvg")) selectWp(el.dataset.wp); break;
     case "map-reset": UI.mapView = null; renderMap(); break;
+    case "gal-select": e.preventDefault(); galSelect(el.dataset.sys, true); break;
+    case "gal-open": openSystemMap(el.dataset.sys); break;
+    case "gal-fit": UI.galView = null; drawGalaxy(); break;
+    case "gal-fleet": galFleetView(); break;
+    case "gal-zoom": if (galEnsureView()) { const { w, h } = galSize(); galZoomTo(UI.galView, UI.galView.scale * Number(el.dataset.f), w / 2, h / 2); drawGalaxy(); } break;
     case "open-market": UI.marketTab = "browse"; UI.marketSel = el.dataset.wp; break;
     case "market-tab": UI.marketTab = el.dataset.k; VIEWS.markets.update(); break;
     case "select-market": UI.marketSel = el.dataset.wp; VIEWS.markets.update(); await load(["history"]); VIEWS.markets.update(); break;
@@ -1218,7 +1608,7 @@ function resourcesFor(e) {
     for (const k of e.keys ?? []) {
       if (k === "agent") r.push("credits");
       else if (k.startsWith("market:")) r.push("markets", "history");
-      else if (k === "fleet" || k.startsWith("system")) r.push("universe");
+      else if (k === "fleet" || k.startsWith("system")) r.push("universe", "galaxy");
     }
     return r;
   }
@@ -1276,6 +1666,8 @@ setInterval(() => {
     const f = Math.max(0, Math.min(1, (now - t0) / (t1 - t0 || 1)));
     el.setAttribute("transform", `translate(${x0 + (x1 - x0) * f} ${y0 + (y1 - y0) * f})`);
   }
+  // ships crossing between systems move along their line on the galaxy canvas
+  if (UI.view === "galaxy" && !document.hidden && galaxyFleet().moving.length) galRedraw();
   renderLink();
 }, 1000);
 
@@ -1288,6 +1680,7 @@ window.addEventListener("resize", () => {
   resizeT = setTimeout(() => {
     if (UI.view === "overview") VIEWS.overview.update();
     if (UI.view === "map") { UI.mapView = null; renderMap(); }
+    if (UI.view === "galaxy") drawGalaxy();
   }, 150);
 });
 

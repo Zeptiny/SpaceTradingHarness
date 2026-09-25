@@ -498,6 +498,13 @@ pre.json .k { color: var(--blue); } pre.json .s { color: #b7e4a0; } pre.json .n 
 .map-stage { position: relative; overflow: hidden; }
 .map-stage svg { display: block; width: 100%; height: min(72vh, 760px); cursor: grab; touch-action: none; }
 .map-stage svg.dragging { cursor: grabbing; }
+.map-stage canvas { display: block; width: 100%; height: min(72vh, 760px); cursor: grab; touch-action: none;
+  background: radial-gradient(ellipse at center, rgba(142, 167, 255, 0.05), transparent 70%); }
+.map-stage canvas.dragging { cursor: grabbing; }
+.gal-status { position: absolute; left: 12px; top: 12px; }
+.star-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; }
+.star-dot.ring { background: none; border: 2px solid; width: 10px; height: 10px; }
+.star-line { display: inline-block; width: 14px; height: 2px; vertical-align: middle; }
 .map-hud { position: absolute; left: 12px; bottom: 12px; display: flex; gap: 6px; }
 .map-legend { position: absolute; right: 12px; bottom: 12px; display: flex; flex-wrap: wrap; gap: 10px; justify-content: flex-end; max-width: 60%; font-size: 11px; color: var(--muted); }
 .map-legend span { display: inline-flex; align-items: center; gap: 5px; }

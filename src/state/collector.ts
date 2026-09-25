@@ -1,5 +1,7 @@
 import { config } from "../config.js";
 import { transport } from "../transport/http.js";
+import { galaxy, PAGE_SIZE } from "./galaxy.js";
+import { mirror, storeKeys, type FleetState } from "./store.js";
 import { atlas, type KnownConstruction, type KnownGate, type KnownMarket, type KnownSystem, type KnownWaypoint } from "./atlas.js";
 import { prices } from "./prices.js";
 import { shipyards } from "./shipyards.js";
@@ -243,15 +245,53 @@ export async function collectOnce(maxRequests: number): Promise<number> {
   return spent;
 }
 
+const DUMP_TIMEOUT_MS = 180_000;
+
+/**
+ * Fills the panel's galaxy map (see galaxy.ts): the bulk dump once, else up to
+ * `maxRequests` system-list pages. Same rules as collectOnce: only while the
+ * agent sleeps, and it stops the moment a wake starts. Returns requests spent.
+ */
+export async function collectGalaxy(maxRequests: number): Promise<number> {
+  if (runtime.wake || runtime.paused || maxRequests <= 0) return 0;
+  const fleetSystems = (mirror.get<FleetState>(storeKeys.fleet)?.ships ?? []).map(s => s.nav.systemSymbol);
+  if (galaxy.resetIfStale(fleetSystems)) console.log("[collector] galaxy map is from an earlier reset; refetching");
+  if (galaxy.complete) return 0;
+  let spent = 0;
+  if (galaxy.dumpDue()) {
+    spent++;
+    try {
+      const systems = await transport.requestRaw<System[]>("/systems.json", DUMP_TIMEOUT_MS);
+      if (!Array.isArray(systems) || !systems.length) throw new Error("empty or unexpected dump");
+      galaxy.recordDump(systems);
+      console.log(`[collector] galaxy map: ${systems.length} systems from the bulk dump`);
+      return spent;
+    } catch (err) {
+      galaxy.dumpFailed();
+      console.warn("[collector] bulk systems dump unavailable, paging instead:", err instanceof Error ? err.message : err);
+    }
+  }
+  while (spent < maxRequests && !runtime.wake && !galaxy.complete) {
+    spent++;
+    const page = galaxy.nextPage;
+    const r = await transport.request<System[]>("getSystems", { query: { limit: PAGE_SIZE, page } });
+    galaxy.recordPage(page, r.data, (r.meta as { total?: number } | undefined)?.total);
+  }
+  if (galaxy.complete) console.log(`[collector] galaxy map complete: ${galaxy.status().count} systems`);
+  return spent;
+}
+
 export function startCollector(): void {
-  const { collectorIntervalMs, collectorRequests } = config.agent;
-  if (collectorIntervalMs <= 0 || collectorRequests <= 0) return;
+  const { collectorIntervalMs, collectorRequests, galaxyPagesPerPass } = config.agent;
+  if (collectorIntervalMs <= 0 || (collectorRequests <= 0 && galaxyPagesPerPass <= 0)) return;
   let busy = false;
   setInterval(() => {
     if (busy) return;
     busy = true;
     collectOnce(collectorRequests)
       .catch(err => console.warn("[collector] pass failed:", err instanceof Error ? err.message : err))
+      .then(() => collectGalaxy(galaxyPagesPerPass))
+      .catch(err => console.warn("[collector] galaxy pass failed:", err instanceof Error ? err.message : err))
       .finally(() => {
         busy = false;
       });
