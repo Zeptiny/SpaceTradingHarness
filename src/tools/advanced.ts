@@ -7,7 +7,7 @@ import {
   cargoHasGood, cooldownClear, inOrbit, isDocked, knownShip,
   notInTransit, shipHasModule, shipHasMount, transferTargetReady, waypointHasTrait,
 } from "../guards/index.js";
-import { cooldownNote, cooldownWakeAt, stamp } from "../utils/time.js";
+import { cooldownNote, cooldownWakeAt } from "../utils/time.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
 import type { Survey } from "../generated/types.js";
 
@@ -25,7 +25,7 @@ registerTool({
     const ship = await ctx.fresh.ship(shipSymbol);
     if (ship) upsertShip({ ...ship, nav: data.nav, fuel: data.fuel });
     return {
-      summary: `${shipSymbol} warping to ${waypointSymbol}, arrives ${stamp(data.nav.route?.arrival)}, fuel ${data.fuel.current}/${data.fuel.capacity}`,
+      summary: `${shipSymbol} warping to ${waypointSymbol}, fuel ${data.fuel.current}/${data.fuel.capacity}`,
       result: data,
       followUpWakeAt: data.nav.route?.arrival ? Date.parse(data.nav.route.arrival) + 2000 : undefined,
       followUpReason: `${shipSymbol} warp arrival`,
@@ -88,11 +88,7 @@ registerTool({
   handler: async ({ shipSymbol, survey }, ctx) => {
     const ship = await ctx.fresh.ship(shipSymbol);
     await ensureOrbit(shipSymbol, ship);
-    // Send only the API's fields: results carry harness-added "<field>Rel"
-    // annotations the agent may echo back, and passthrough would forward them.
-    const s = survey as { signature: string; symbol: string; deposits: (string | { symbol: string })[]; expiration: string; size: string };
-    const deposits = s.deposits.map(d => ({ symbol: typeof d === "string" ? d : d.symbol }));
-    const { data } = await api.extractWithSurvey(shipSymbol, { signature: s.signature, symbol: s.symbol, deposits, expiration: s.expiration, size: s.size } as Survey);
+    const { data } = await api.extractWithSurvey(shipSymbol, survey as Survey);
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
     return {
       summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol} (surveyed), cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}`,
@@ -107,8 +103,7 @@ function surveySchema() {
   return z.object({
     signature: z.string(),
     symbol: z.string(),
-    // The API returns deposits as { symbol } objects; accept bare symbols too.
-    deposits: z.array(z.union([z.string(), z.object({ symbol: z.string() }).passthrough()])),
+    deposits: z.array(z.string()),
     expiration: z.string(),
     size: z.string(),
   }).passthrough();
