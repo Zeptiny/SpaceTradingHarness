@@ -33,6 +33,8 @@ export const config = {
     actionsPerShip: num("AGENT_ACTIONS_PER_SHIP", 6),
     // Credits the agent must keep on hand (fuel, cargo capital); ship purchases may not dip below it.
     creditReserve: num("AGENT_CREDIT_RESERVE", 25_000),
+    // API requests the wake-start collector may spend reading markets/shipyards where ships sit (0 disables).
+    autoScanRequests: num("AGENT_AUTO_SCAN_REQUESTS", 8),
     maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 32),
     maxConcurrentTools: num("AGENT_MAX_CONCURRENT_TOOLS", 3),
     wakeTimeoutMs: num("AGENT_WAKE_TIMEOUT_MS", 180_000),

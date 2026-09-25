@@ -4,7 +4,10 @@ import { activity } from "../state/activity.js";
 import { memory } from "../state/memory.js";
 import { summaries } from "../state/summaries.js";
 import { checkpointStore, type AgentPlan } from "../state/checkpoint.js";
-import { refreshAgent, refreshContracts, refreshFleet } from "../state/refresh.js";
+import { refreshAgent, refreshContracts, refreshFleet, scanShipLocations } from "../state/refresh.js";
+import { atlas } from "../state/atlas.js";
+import { ledger, type Trend } from "../state/ledger.js";
+import { computeTradeLeads, prices, type TradeLead } from "../state/prices.js";
 import { runtime } from "../state/runtime.js";
 import { getTool, toolSpecs } from "../tools/registry.js";
 import { executeTool, type ExecOutcome } from "../tools/executor.js";
@@ -30,6 +33,7 @@ Strategy:
 - Parallel income: (1) Trading — buy where a good is EXPORTed cheap, sell where it is IMPORTed dear; check tradeVolume per transaction and that margin × units clearly beats fuel. (2) Mining — mining drones / ore hounds extract at asteroid fields and sell (or hand off via transfer_cargo to a hauler). (3) Probes — cheap ships parked at markets and shipyards keep prices visible without spending fuel.
 - Invest continuously. When economy.investable covers a ship's price, buy one. Default order when unsure: 1–2 probes early to map markets and shipyards; then light haulers for trading once you know a profitable route, or mining drones if an asteroid field with nearby buyers exists. Keep buying while payback looks good. purchase_ship needs one of your ships at the shipyard (that is also how prices get revealed; prices you've seen are in economy.knownShipOffers). Assign every new ship a job in the same wake.
 - Keep the reserve (economy.reserve) for fuel, cargo capital and contract purchases; purchase_ship refuses buys that would dip below it.
+- Working memory does the bookkeeping for you: economy.trend is your measured income (earned = credit change + ship spend), market.tradeLeads are the best buy-here/sell-there spreads from prices your ships have seen (refreshed at every waypoint where a ship sits), map lists known markets/shipyards/asteroids with coordinates. Use them before spending calls on discovery; send a ship or probe to market.unpricedMarkets to widen coverage.
 - Track what works: remember() profitable routes (good, buy at, sell at, margin) and ship payback; set_goal for fleet-size and credit targets and complete them as you pass them.
 
 Rules:
@@ -51,7 +55,14 @@ interface WorkingMemory {
     fleetSize: number;
     idleShips: string[];
     knownShipOffers: { type: string; price: number; waypoint: string; supply: string; seenMinutesAgo: number }[];
+    trend: { lastHour: Trend | null; lastDay: Trend | null };
   };
+  market: {
+    scannedThisWake: string[];
+    tradeLeads: TradeLead[];
+    unpricedMarkets: string[];
+  };
+  map: ReturnType<typeof atlas.summary>;
   fleet: { asOf: string; ships: unknown[] };
   contracts: { asOf: string; items: unknown[]; closedCount: number };
   goals: unknown[];
@@ -67,6 +78,13 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   if (!agent) alerts.push("agent data unavailable (API refresh failed) — retry get_my_agent before spending credits");
   if (!ships) alerts.push("fleet data unavailable (API refresh failed) — verify with list_ships before acting");
   if (!contracts) alerts.push("contracts data unavailable (API refresh failed)");
+
+  // Harness-side collection before the agent thinks: price every market a
+  // ship is sitting at and log the balance for the income trend.
+  const scan = ships && config.agent.autoScanRequests > 0
+    ? await scanShipLocations(ships, config.agent.autoScanRequests)
+    : { markets: [], shipyards: [] };
+  if (agent && ships) ledger.sample(agent.credits, ships.length);
 
   const now = new Date().toISOString();
   const shipState = (s: Ship): string => {
@@ -92,6 +110,29 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   } else if (investable && !offers.length) {
     alerts.push(`${investable} cr investable but no ship prices known — find SHIPYARD waypoints (get_system_waypoints traitFilter SHIPYARD) and send a ship to read prices`);
   }
+
+  const trend = { lastHour: ledger.trend(3600_000), lastDay: ledger.trend(24 * 3600_000) };
+  if (trend.lastHour && trend.lastHour.windowHours >= 0.5 && trend.lastHour.earned <= 0) {
+    alerts.push(`no net income over the last ${trend.lastHour.windowHours}h (earned ${trend.lastHour.earned} cr) — current jobs are not paying; change them`);
+  }
+
+  const latestPrices = prices.latest();
+  const tradeLeads = computeTradeLeads(latestPrices, { distance: (a, b) => atlas.distance(a, b) });
+  const fleetSystems = [...new Set((ships ?? []).map(s => s.nav.systemSymbol))];
+  const priced = prices.marketsSeen();
+  const unpricedMarkets = fleetSystems
+    .flatMap(sys => atlas.inSystem(sys))
+    .filter(w => w.traits.includes("MARKETPLACE") && !priced.has(w.symbol))
+    .map(w => w.symbol);
+  if (!atlas.inSystem(fleetSystems[0] ?? "").length && fleetSystems.length) {
+    alerts.push(`map of ${fleetSystems.join(", ")} unknown — get_system_waypoints once (it is remembered) to see markets, shipyards and asteroids`);
+  }
+  const bestBuy = (good: string): { price: number; at: string } | null => {
+    const src = latestPrices
+      .filter(p => p.good === good && p.purchasePrice != null && p.type !== "IMPORT")
+      .sort((a, b) => a.purchasePrice! - b.purchasePrice!)[0];
+    return src ? { price: src.purchasePrice!, at: src.waypoint } : null;
+  };
 
   for (const s of ships ?? []) {
     if (s.fuel && s.fuel.capacity > 0 && s.fuel.current / s.fuel.capacity < 0.2) {
@@ -129,14 +170,24 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
       fleetSize: ships?.length ?? 0,
       idleShips,
       knownShipOffers: offers,
+      trend,
     },
+    market: {
+      scannedThisWake: [...scan.markets, ...scan.shipyards.map(s => `${s} (shipyard)`)],
+      tradeLeads,
+      unpricedMarkets,
+    },
+    map: atlas.summary(fleetSystems),
     fleet: {
       asOf: ships ? now : "unavailable",
       ships: (ships ?? []).map(s => ({ state: shipState(s), ...compactShip(s) })),
     },
     contracts: {
       asOf: contracts ? now : "unavailable",
-      items: openContracts.map(contractSummary),
+      items: openContracts.map(c => {
+        const summary = contractSummary(c);
+        return { ...summary, deliverables: summary.deliverables.map(d => ({ ...d, knownCheapestSource: bestBuy(d.symbol) })) };
+      }),
       closedCount: (contracts?.length ?? 0) - openContracts.length,
     },
     goals: memory.activeGoals(),

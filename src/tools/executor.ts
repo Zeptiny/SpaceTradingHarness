@@ -5,6 +5,7 @@ import { api } from "../client/index.js";
 import { mergeSystemWaypoints, mirror, storeKeys, upsertShip } from "../state/store.js";
 import { prices } from "../state/prices.js";
 import { shipyards } from "../state/shipyards.js";
+import { atlas } from "../state/atlas.js";
 import { SpaceTradersError } from "../transport/http.js";
 import { getTool, type ToolContext } from "./registry.js";
 import type { FreshReader, GuardResult } from "../guards/index.js";
@@ -93,6 +94,7 @@ function makeFreshReader(): FreshReader {
         const { data } = await api.getWaypoint(system, wp);
         mirror.set(storeKeys.waypoint(system, wp), data);
         mergeSystemWaypoints(system, [data]);
+        atlas.record([data]);
         return data;
       } catch (err) {
         if (isNotFound(err)) return undefined;

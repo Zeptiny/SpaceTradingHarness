@@ -43,7 +43,14 @@ export async function startSocketIngest(): Promise<void> {
       const now = Date.now();
       if (now - lastWake > MIN_WAKE_GAP_MS && !scheduler.paused) {
         lastWake = now;
-        scheduler.wakeNow(`socket event: ${event}`);
+        // Hand the agent what happened, not just that something did.
+        let detail = "";
+        try {
+          detail = payload === undefined ? "" : ` ${JSON.stringify(payload).slice(0, 300)}`;
+        } catch {
+          // unserializable payload — the event name alone will do
+        }
+        scheduler.wakeNow(`socket event: ${event}${detail}`);
       }
     });
   } catch (err) {
