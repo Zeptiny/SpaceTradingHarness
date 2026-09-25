@@ -52,6 +52,8 @@ export const config = {
     // Background collector while the agent sleeps: maps systems, refreshes parked-ship prices, reads jump gates (0 disables).
     collectorIntervalMs: num("AGENT_COLLECTOR_INTERVAL_MS", 120_000),
     collectorRequests: num("AGENT_COLLECTOR_REQUESTS", 6),
+    // Extra requests per collector pass for the panel's galaxy map, only if the bulk systems dump is unavailable (0 turns the galaxy fetch off).
+    galaxyPagesPerPass: num("AGENT_GALAXY_PAGES_PER_PASS", 6),
     maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 32),
     // Round cap scales with fleet size like the action budget: max(maxRoundsPerWake, this × fleet).
     roundsPerShip: num("AGENT_ROUNDS_PER_SHIP", 4),

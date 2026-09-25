@@ -36,6 +36,8 @@ const { runtime } = await import("./state/runtime.js");
 const { mirror, storeKeys, mergeSystemWaypoints, observeAgent, upsertShip } = await import("./state/store.js");
 const { scheduler } = await import("./agent/scheduler.js");
 const { startPanel } = await import("./panel/server.js");
+const { galaxy } = await import("./state/galaxy.js");
+const { atlas } = await import("./state/atlas.js");
 await import("./tools/read.js");
 await import("./tools/actions.js");
 await import("./tools/internal.js");
@@ -49,6 +51,7 @@ type Waypoint = import("./generated/types.js").Waypoint;
 type Market = import("./generated/types.js").Market;
 type Contract = import("./generated/types.js").Contract;
 type Agent = import("./generated/types.js").Agent;
+type System = import("./generated/types.js").System;
 type ToolOutcome = import("./events/bus.js").ToolOutcome;
 
 const SYS = "X1-KD26";
@@ -97,7 +100,66 @@ const waypoints: Waypoint[] = wpSpecs.map(([suffix, type, x, y, traits, orbits])
   isUnderConstruction: suffix === "I53",
 }));
 mergeSystemWaypoints(SYS, waypoints);
+atlas.record(waypoints);
 const coords = new Map(waypoints.map(w => [w.symbol, w]));
+
+// ---------------------------------------------------------------- galaxy
+
+// A seeded four-arm spiral of systems for the galaxy map, with the home system
+// on an arm and a small jump network around it (fixed seed: same map each run).
+const galaxySystems: System[] = [];
+let NEIGHBORS: string[] = [];
+{
+  let seed = 0x5eed;
+  const rnd = () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const gauss = () => Math.sqrt(-2 * Math.log(rnd() + 1e-9)) * Math.cos(2 * Math.PI * rnd());
+  const types: [System["type"], number][] = [
+    ["RED_STAR", 30], ["ORANGE_STAR", 20], ["YOUNG_STAR", 10], ["WHITE_DWARF", 10], ["BLUE_STAR", 8],
+    ["NEUTRON_STAR", 8], ["NEBULA", 5], ["HYPERGIANT", 3], ["BLACK_HOLE", 3], ["UNSTABLE", 3],
+  ];
+  const pickType = () => {
+    let r = rnd() * 100;
+    for (const [t, w] of types) if ((r -= w) < 0) return t;
+    return "RED_STAR" as System["type"];
+  };
+  const L = "ABCDEFGHJKLMNPQRSTUVWXYZ";
+  const used = new Set([SYS]);
+  const sysAt = (symbol: string, x: number, y: number, type: System["type"], wpCount: number): System => ({
+    symbol, sectorSymbol: "X1", type, x: Math.round(x), y: Math.round(y),
+    waypoints: Array.from({ length: wpCount }, (_, i) => ({ symbol: `${symbol}-W${i}`, type: i === 0 ? "JUMP_GATE" : "PLANET", x: 0, y: 0, orbitals: [] })) as System["waypoints"],
+    factions: rnd() < 0.3 ? [{ symbol: "COSMIC" }] : [],
+  });
+  for (let i = 0; i < 6000; i++) {
+    let symbol = "";
+    do symbol = `X1-${L[Math.floor(rnd() * L.length)]}${L[Math.floor(rnd() * L.length)]}${Math.floor(rnd() * 99) + 1}`; while (used.has(symbol));
+    used.add(symbol);
+    const t = Math.pow(rnd(), 0.7);
+    const r = 800 + t * 36_000;
+    const a = (i % 4) * (Math.PI / 2) + t * 5.2 + gauss() * 0.18;
+    const spread = 600 + t * 1800;
+    galaxySystems.push(sysAt(symbol, r * Math.cos(a) + gauss() * spread, r * Math.sin(a) + gauss() * spread, pickType(), 4 + Math.floor(rnd() * 22)));
+  }
+  const home = sysAt(SYS, 11_800 * Math.cos(1.9), 11_800 * Math.sin(1.9), "ORANGE_STAR", waypoints.length);
+  galaxySystems.push(home);
+  const near = galaxySystems
+    .filter(s => s.symbol !== SYS)
+    .map(s => [s, Math.hypot(s.x - home.x, s.y - home.y)] as const)
+    .sort((a, b) => a[1] - b[1]);
+  NEIGHBORS = near.slice(0, 6).map(([s]) => s.symbol);
+  galaxy.recordDump(galaxySystems);
+  atlas.recordSystem(home);
+  for (const [s] of near.slice(0, 10)) atlas.recordSystem(s);
+  atlas.recordGate({ symbol: wp("I53"), connections: NEIGHBORS.map(n => `${n}-W0`) }, SYS);
+  // two neighbors link onward, so the network reaches past the first hop
+  for (const [k, n] of NEIGHBORS.slice(0, 2).entries()) {
+    atlas.recordGate({ symbol: `${n}-W0`, connections: [`${SYS}-I53`, ...near.slice(6 + k * 2, 8 + k * 2).map(([s]) => `${s.symbol}-W0`)] }, n);
+  }
+}
 
 // ---------------------------------------------------------------- markets
 
@@ -223,6 +285,27 @@ const fleet: Ship[] = [
   mkShip({ n: 5, role: "EXCAVATOR", frame: "FRAME_DRONE", at: wp("F45"), status: "IN_ORBIT", fuel: [12, 80], cargo: [["IRON_ORE", 15]], capacity: 15, mounts: ["MOUNT_MINING_LASER_I"], modules: ["MODULE_CARGO_HOLD_I"], speed: 9 }),
   mkShip({ n: 6, role: "HAULER", frame: "FRAME_LIGHT_FREIGHTER", at: wp("A1"), status: "IN_TRANSIT", fuel: [455, 600], cargo: [["MACHINERY", 40]], capacity: 80, route: { from: wp("D40"), to: wp("A1"), departed: now - 2 * MIN, arrival: now + 11 * MIN }, speed: 30 }),
 ];
+// A probe warping to a neighboring system shows cross-system travel on the galaxy map.
+{
+  const probe = structuredClone(fleet[1]!);
+  const dest = NEIGHBORS[1]!;
+  probe.symbol = `${AGENT}-7`;
+  probe.registration.name = probe.symbol;
+  probe.cooldown.shipSymbol = probe.symbol;
+  probe.nav = {
+    ...probe.nav,
+    systemSymbol: dest,
+    waypointSymbol: `${dest}-W0`,
+    status: "IN_TRANSIT",
+    route: {
+      origin: { ...probe.nav.route.origin, symbol: wp("I53"), systemSymbol: SYS },
+      destination: { symbol: `${dest}-W0`, type: "JUMP_GATE", systemSymbol: dest, x: 0, y: 0 },
+      departureTime: iso(now - 9 * MIN),
+      arrival: iso(now + 16 * MIN),
+    },
+  };
+  fleet.push(probe);
+}
 mirror.set(storeKeys.fleet, { ships: fleet });
 
 // ---------------------------------------------------------------- contracts

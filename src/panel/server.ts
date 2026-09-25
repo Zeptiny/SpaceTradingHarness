@@ -9,6 +9,8 @@ import { checkpointStore } from "../state/checkpoint.js";
 import { mirror, storeKeys, type FleetState } from "../state/store.js";
 import { runtime } from "../state/runtime.js";
 import { prices } from "../state/prices.js";
+import { atlas } from "../state/atlas.js";
+import { galaxy, toRow } from "../state/galaxy.js";
 import { creditHistory } from "../state/credits.js";
 import { toolCatalogJson } from "../tools/registry.js";
 import { compactMarket, compactShip, compactWaypoint, contractSummary } from "../state/projections.js";
@@ -145,12 +147,26 @@ export function startPanel(): void {
       if (!systemsBySymbol.has(system)) systemsBySymbol.set(system, { symbol: system });
     }
     res.json({
+      galaxy: galaxy.status(),
+      gateLinks: atlas.gateLinks(),
+      intel: atlas.systemIntel(),
       systems: [...systemsBySymbol.values()].sort((a, b) => a.symbol.localeCompare(b.symbol)),
       waypointsBySystem: Object.fromEntries(waypointsBySystem),
       inTransit: (fleet?.ships ?? [])
         .filter(s => s.nav.status === "IN_TRANSIT")
         .map(s => ({ symbol: s.symbol, from: s.nav.route.origin.symbol, to: s.nav.route.destination.symbol, arrival: s.nav.route.arrival })),
     });
+  });
+
+  // Every system's position and star type for the galaxy map (panel only; the
+  // agent never sees it). Systems the atlas read itself fill in while the full
+  // list is still loading.
+  app.get("/api/galaxy", (_req, res) => {
+    const rows = new Map(galaxy.rows().map(r => [r[0], r]));
+    for (const s of atlas.allSystems()) {
+      if (!rows.has(s.symbol)) rows.set(s.symbol, toRow(s, Object.values(s.waypointTypes).reduce((n, c) => n + c, 0)));
+    }
+    res.json({ ...galaxy.status(), systems: [...rows.values()] });
   });
 
   // Latest snapshot per market (whatever the agent last fetched) — the
