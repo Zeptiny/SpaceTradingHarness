@@ -7,7 +7,22 @@ export interface PricePoint {
   purchasePrice: number | null;
   sellPrice: number | null;
   volume: number | null;
+  type?: string | undefined; // EXPORT | IMPORT | EXCHANGE (absent on points recorded before this field existed)
+  supply?: string | undefined;
   ts: number;
+}
+
+export interface TradeLead {
+  good: string;
+  buyAt: string;
+  buyPrice: number;
+  sellAt: string;
+  sellPrice: number;
+  marginPerUnit: number;
+  unitsPerTrade: number; // min tradeVolume of both ends — what one buy/sell call moves without moving the price much
+  profitPerTrade: number;
+  distance: number | null;
+  ageMinutes: number; // age of the older of the two price observations
 }
 
 type History = Record<string, PricePoint[]>;
@@ -38,6 +53,8 @@ class PriceHistory {
         purchasePrice: g.purchasePrice ?? null,
         sellPrice: g.sellPrice ?? null,
         volume: g.tradeVolume ?? null,
+        type: g.type,
+        supply: g.supply,
         ts,
       });
       this.history[key] = arr.slice(-PER_KEY);
@@ -58,6 +75,18 @@ class PriceHistory {
     return out.sort((a, b) => b.ts - a.ts).slice(0, limit * 5);
   }
 
+  /** Latest observation per (waypoint, good). */
+  latest(): PricePoint[] {
+    return Object.values(this.history).map(arr => arr[arr.length - 1]).filter((p): p is PricePoint => !!p);
+  }
+
+  /** Markets observed, with the time of their latest observation. */
+  marketsSeen(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const p of this.latest()) out.set(p.waypoint, Math.max(out.get(p.waypoint) ?? 0, p.ts));
+    return out;
+  }
+
   bestPrices(good: string): { buyFrom: PricePoint | undefined; sellTo: PricePoint | undefined } {
     const points = this.query({ good, limit: PER_KEY });
     const sells = points.filter(p => p.purchasePrice != null);
@@ -67,6 +96,46 @@ class PriceHistory {
       sellTo: buys.sort((a, b) => (b.sellPrice ?? 0) - (a.sellPrice ?? 0))[0],
     };
   }
+}
+
+/**
+ * Best buy-here/sell-there spreads from the latest observation of every
+ * (waypoint, good). Pure over the given points so it can be tested.
+ */
+export function computeTradeLeads(
+  latest: PricePoint[],
+  opts: { now?: number; maxAgeMs?: number; limit?: number; distance?: (a: string, b: string) => number | null } = {},
+): TradeLead[] {
+  const now = opts.now ?? Date.now();
+  const maxAge = opts.maxAgeMs ?? 24 * 3600_000;
+  const fresh = latest.filter(p => now - p.ts <= maxAge);
+  const byGood = new Map<string, PricePoint[]>();
+  for (const p of fresh) byGood.set(p.good, [...(byGood.get(p.good) ?? []), p]);
+  const leads: TradeLead[] = [];
+  for (const [good, points] of byGood) {
+    for (const src of points) {
+      if (src.purchasePrice == null || src.type === "IMPORT") continue;
+      for (const dst of points) {
+        if (dst.waypoint === src.waypoint || dst.sellPrice == null || dst.type === "EXPORT") continue;
+        const margin = dst.sellPrice - src.purchasePrice;
+        if (margin <= 0) continue;
+        const units = Math.min(src.volume ?? 1, dst.volume ?? 1);
+        leads.push({
+          good,
+          buyAt: src.waypoint,
+          buyPrice: src.purchasePrice,
+          sellAt: dst.waypoint,
+          sellPrice: dst.sellPrice,
+          marginPerUnit: margin,
+          unitsPerTrade: units,
+          profitPerTrade: margin * units,
+          distance: opts.distance?.(src.waypoint, dst.waypoint) ?? null,
+          ageMinutes: Math.round((now - Math.min(src.ts, dst.ts)) / 60_000),
+        });
+      }
+    }
+  }
+  return leads.sort((a, b) => b.profitPerTrade - a.profitPerTrade).slice(0, opts.limit ?? 8);
 }
 
 export const prices = new PriceHistory();

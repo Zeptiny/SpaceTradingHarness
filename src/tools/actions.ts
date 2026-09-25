@@ -10,6 +10,7 @@ import { ensureDocked, ensureOrbit } from "./navstate.js";
 import { config } from "../config.js";
 import { cooldownWakeAt, etaWakeAt } from "../utils/time.js";
 import { compactShip } from "../state/projections.js";
+import { ledger } from "../state/ledger.js";
 import { ShipTypeValues, type ShipNavFlightMode } from "../generated/types.js";
 
 registerTool({
@@ -229,6 +230,7 @@ registerTool({
     const { data } = await api.purchaseShip(shipType, waypointSymbol);
     upsertShip(data.ship);
     mirror.set(storeKeys.agent, data.agent);
+    ledger.recordShipPurchase(data.transaction.price);
     return {
       summary: `purchased ${data.ship.symbol} (${shipType}) at ${waypointSymbol} for ${data.transaction.price} cr; credits now ${data.agent.credits}`,
       result: { ship: compactShip(data.ship), credits: data.agent.credits, price: data.transaction.price },

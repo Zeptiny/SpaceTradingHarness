@@ -5,6 +5,7 @@ import { refreshAgent, refreshContracts, refreshFleet, fetchMarket, paginate } f
 import { registerTool } from "./registry.js";
 import { systemOf } from "../utils/symbols.js";
 import { shipyards } from "../state/shipyards.js";
+import { atlas } from "../state/atlas.js";
 import type { System, Waypoint, Faction, Shipyard } from "../generated/types.js";
 import { WaypointTraitSymbolValues } from "../generated/types.js";
 import { compactShip } from "../state/projections.js";
@@ -120,6 +121,7 @@ registerTool({
   handler: async ({ systemSymbol, traitFilter, page }) => {
     const waypoints = await api.listSystemWaypoints(systemSymbol, 20, page, traitFilter).then(r => r.data);
     const merged = mergeSystemWaypoints(systemSymbol, waypoints);
+    atlas.record(waypoints);
     return {
       summary: `page ${page}: ${waypoints.length}${traitFilter ? ` (${traitFilter})` : ""}; system total: ${merged.length} waypoints`,
       result: waypoints.map(w => ({ symbol: w.symbol, type: w.type, x: w.x, y: w.y, traits: w.traits.map(t => t.symbol) })),
@@ -138,6 +140,7 @@ registerTool({
     const { data: wp } = await api.getWaypoint(system, waypointSymbol);
     mirror.set(storeKeys.waypoint(system, waypointSymbol), wp);
     mergeSystemWaypoints(system, [wp]);
+    atlas.record([wp]);
     return { summary: `${wp.symbol} ${wp.type} [${wp.traits.map(t => t.symbol).join(",")}]`, result: wp };
   },
 });
