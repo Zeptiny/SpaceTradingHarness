@@ -355,10 +355,13 @@ let running = false;
 
 export async function runWake(wakeup: Wakeup): Promise<void> {
   if (running) {
-    scheduler.schedule(Date.now() + 5000, "requeue: loop busy", wakeup.scope);
+    // The scheduler holds wakes while busy, so this only catches a direct
+    // call. Keep the original reason; it fires once the current wake ends.
+    scheduler.schedule(Date.now(), wakeup.reason, wakeup.scope);
     return;
   }
   running = true;
+  scheduler.setBusy(true);
   const startedAt = Date.now();
   const requestsAtStart = runtime.requestsTotal;
   const tokens = { prompt: 0, completion: 0, cached: 0 };
@@ -567,6 +570,8 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
     if (!scheduler.paused && scheduler.pending().length === 0) {
       scheduler.schedule(Date.now() + config.agent.fallbackWakeMs, "fallback periodic wake");
     }
+    // Releases wakes that came due during this one, merged into a single wake.
+    scheduler.setBusy(false);
   }
 }
 
