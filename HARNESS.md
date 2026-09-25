@@ -8,7 +8,7 @@ Practical notes for building an agent harness on top of the SpaceTraders API. Fu
 - Auth: `Authorization: Bearer <agentToken>` header on all agent endpoints
 - Spec source: `https://api.spacetraders.io/v2/documentation/json` (also vendored at repo root as `openapi.json`)
 - 64 operations across 8 tag groups; 78 component schemas
-- Global rate limit: ~2 requests/second (409/429 errors on violation). Server sends `X-Req-RateLimit-*` headers.
+- Global rate limit: ~2 requests/second (409/429 errors on violation). Server sends `X-RateLimit-*` headers.
 - Errors: JSON body `{ "error": { "message", "code", "data" } }`; code list at `GET /error-codes`
 
 ## Tool Surface (by capability)

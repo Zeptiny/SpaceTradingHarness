@@ -1,6 +1,7 @@
 import type { Agent, Market, Ship, ShipNavFlightMode, ShipNavStatus, Shipyard, Waypoint } from "../generated/types.js";
 import { systemOf } from "../utils/symbols.js";
 import { distance, fuelCost } from "../utils/nav.js";
+import { secondsUntil, WAIT_HINT } from "../utils/time.js";
 
 /**
  * Fresh state reader. Implementations fetch live from the API (memoized per
@@ -70,8 +71,15 @@ export const notInTransit: Guard = async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;
   if (r.ship.nav.status === "IN_TRANSIT") {
-    const arrival = r.ship.nav.route?.arrival ? new Date(r.ship.nav.route.arrival).toISOString() : "unknown";
-    return { ok: false, reason: `${r.symbol} in transit until ${arrival}` };
+    // Status comes from a live fetch; the arrival time is the server's, so
+    // "0s" with IN_TRANSIT only means the server hasn't flipped it yet.
+    const route = r.ship.nav.route;
+    const arrival = route?.arrival ? new Date(route.arrival).toISOString() : "unknown";
+    const left = secondsUntil(route?.arrival);
+    return {
+      ok: false,
+      reason: `${r.symbol} in transit to ${route?.destination.symbol ?? "?"}, arrives ${arrival} (${left > 0 ? `${left}s from now` : "any second"}); ${WAIT_HINT}`,
+    };
   }
   return { ok: true };
 };
@@ -79,8 +87,16 @@ export const notInTransit: Guard = async (_name, ctx) => {
 export const cooldownClear: Guard = async (_name, ctx) => {
   const r = await requireShip(ctx);
   if ("error" in r) return r.error;
-  if (r.ship.cooldown && r.ship.cooldown.remainingSeconds > 0) {
-    return { ok: false, reason: `${r.symbol} cooling down ${r.ship.cooldown.remainingSeconds}s` };
+  // remainingSeconds is computed by the server at fetch time, so no local
+  // clock is involved. Survey, extract, siphon, refine, scan and jump all
+  // share this one reactor cooldown.
+  const cd = r.ship.cooldown;
+  if (cd && cd.remainingSeconds > 0) {
+    const until = cd.expiration ? ` (until ${cd.expiration})` : "";
+    return {
+      ok: false,
+      reason: `${r.symbol} on cooldown ${cd.remainingSeconds}s more${until}, shared by survey/extract/siphon/refine/scan/jump; ${WAIT_HINT}`,
+    };
   }
   return { ok: true };
 };

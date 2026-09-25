@@ -172,7 +172,7 @@ scheduler wakeups ───────┘       │
 
 ### 3.2 Panel views (value order)
 
-1. **Dashboard** — credits, fleet size, agent rank, server reset countdown, **rate-limit gauge** (tracked from `X-Req-RateLimit-*` headers on every response, fed through the bus).
+1. **Dashboard** — credits, fleet size, agent rank, server reset countdown, **rate-limit gauge** (tracked from `X-RateLimit-*` headers on every response, fed through the bus).
 2. **Fleet view** — per-ship cards: nav status, location, fuel %, cargo fill, cooldown remaining, current task; live via SSE.
 3. **Activity log** — the observability centerpiece. Every tool call: name, args, result summary, duration, guards passed/failed, API requests consumed. Makes the agent auditable and debuggable. Persist it.
 4. **Contracts board** — delivery progress (delivered/required per good), deadlines, payouts.
@@ -248,7 +248,7 @@ The biggest duplication risk in an API harness is re-typing the API. Rule: **if 
 
 ### 5.2 One transport, one client layer
 
-- Every request — agent loop, tools, socket ingest bootstrap — goes through `transport`. It alone owns: bearer token injection, rate-window tracking (from `X-Req-RateLimit-*` headers), retry with backoff on 429/5xx, and error normalization into `SpaceTradersError { code, message, data }`.
+- Every request — agent loop, tools, socket ingest bootstrap — goes through `transport`. It alone owns: bearer token injection, rate-window tracking (from `X-RateLimit-*` headers), retry with backoff on 429/5xx, and error normalization into `SpaceTradersError { code, message, data }`.
 - Nothing ever string-matches error messages; tools branch on `error.code` (from `GET /error-codes`, also generated into an enum).
 - Pagination exists exactly once: `paginate(route, params)` yields all pages, respecting the rate budget. No tool hand-rolls `?page=` loops.
 
@@ -424,7 +424,7 @@ The panel is read-only data plus a small set of user commands (user commands are
 
 ### 7.2 Pages
 
-1. **Dashboard** — the "is everything fine" glance: credits + 24h delta sparkline, fleet size, agent rank, reset countdown, announcements; rate budget gauge (from `X-Req-RateLimit-*` events, red as it drains); current plan widget (`/api/plan`); alert cards (stalled ships, guard-failure spikes, contract deadlines, low fuel); latest session digest.
+1. **Dashboard** — the "is everything fine" glance: credits + 24h delta sparkline, fleet size, agent rank, reset countdown, announcements; rate budget gauge (from `X-RateLimit-*` events, red as it drains); current plan widget (`/api/plan`); alert cards (stalled ships, guard-failure spikes, contract deadlines, low fuel); latest session digest.
 2. **Fleet** — cards/table per ship (nav status badge, location, fuel %, cargo fill, cooldown ring, current task); ship drawer with full state (modules, mounts, crew), per-ship event timeline, next scheduled wakeup, per-ship pause/resume.
 3. **Map** — systems with jump-gate links, waypoints with traits, ship positions + in-flight routes with ETA arcs; selection syncs with fleet drawer. Largest effort; ships last.
 4. **Markets** — trade-good table with price/volume/sparkline from harness-local history; arbitrage hints net of fuel; supply-chain browser.

@@ -3,7 +3,8 @@ import { registerTool } from "./registry.js";
 import { memory } from "../state/memory.js";
 import { prices } from "../state/prices.js";
 import { runtime } from "../state/runtime.js";
-import { clampWakeAt } from "../utils/time.js";
+import { config } from "../config.js";
+import { clampWakeAt, secondsUntil } from "../utils/time.js";
 import { systemOf } from "../utils/symbols.js";
 import { distance, fuelCost } from "../utils/nav.js";
 
@@ -102,14 +103,56 @@ registerTool({
 
 registerTool({
   name: "get_rate_budget",
-  description: "Remaining API requests in the current rate window (limit is ~2/s).",
+  description: "Remaining API requests in the current rate window. You rarely need this: the harness paces and retries requests itself. Not a way to wait — use wait_for_ship.",
   kind: "internal",
   input: z.object({}).strict(),
   rateCost: 0,
-  handler: async () => ({
-    summary: `rate: ${runtime.rate.remaining ?? "?"} remaining of ${runtime.rate.limit ?? "?"}`,
-    result: { ...runtime.rate },
-  }),
+  handler: async () => {
+    const { limit, remaining, resetAt } = runtime.rate;
+    const pacing = `harness paces requests ${config.transport.minIntervalMs}ms apart and retries 429s`;
+    return {
+      summary: remaining === null
+        ? `no rate-limit headers seen from the server yet; ${pacing}`
+        : `rate: ${remaining} remaining of ${limit ?? "?"}; ${pacing}`,
+      result: {
+        limit,
+        remaining,
+        resetAt: resetAt !== null ? new Date(resetAt).toISOString() : null,
+        minIntervalMs: config.transport.minIntervalMs,
+      },
+    };
+  },
+});
+
+// Longest a wake may block on one ship; anything longer should end the wake
+// and let the scheduled arrival/cooldown wake pick it up.
+const MAX_WAIT_S = 120;
+
+registerTool({
+  name: "wait_for_ship",
+  description: `Sleep until a ship arrives and its cooldown ends, when that is at most ${MAX_WAIT_S}s away, then return so you can act on it next round. Longer waits return immediately with the ready time: work other ships or end_loop (the harness auto-wakes on arrival/cooldown). Call it on its own; other calls in the same batch run right away, not after it.`,
+  kind: "internal",
+  // Deliberately not "shipSymbol": the executor would hold the ship lock for
+  // the whole sleep and time out the ship's other queued calls.
+  input: z.object({ ship: z.string() }),
+  rateCost: 1,
+  handler: async ({ ship }, ctx) => {
+    const s = await ctx.fresh.ship(ship);
+    if (!s) return { summary: `unknown ship ${ship}`, result: { ready: false } };
+    const arrival = s.nav.status === "IN_TRANSIT" ? s.nav.route.arrival : undefined;
+    const readyInS = Math.max(secondsUntil(arrival), secondsUntil(s.cooldown.expiration), s.cooldown.remainingSeconds);
+    const readyAt = new Date(Date.now() + readyInS * 1000).toISOString();
+    if (readyInS === 0) return { summary: `${ship} is ready now`, result: { ready: true, waitedSeconds: 0 } };
+    if (readyInS > MAX_WAIT_S) {
+      return {
+        summary: `${ship} ready in ${readyInS}s (${readyAt}), too long to wait in this wake; work other ships or end_loop, the harness auto-wakes it`,
+        result: { ready: false, readyInSeconds: readyInS, readyAt },
+      };
+    }
+    // +1s so the server has flipped nav status / cleared the cooldown.
+    await new Promise<void>(r => setTimeout(r, (readyInS + 1) * 1000));
+    return { summary: `waited ${readyInS + 1}s; ${ship} should now be ready`, result: { ready: true, waitedSeconds: readyInS + 1 } };
+  },
 });
 
 registerTool({
