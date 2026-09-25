@@ -2,14 +2,15 @@ import { z } from "zod";
 import { api } from "../client/index.js";
 import { observeAgent, removeShip, upsertContract, upsertShip } from "../state/store.js";
 import { compactCargo } from "../state/projections.js";
+import { compactSurvey, surveys } from "../state/surveys.js";
 import { registerTool } from "./registry.js";
 import {
   cargoHasGood, cooldownClear, inOrbit, isDocked, knownShip,
   notInTransit, shipHasModule, shipHasMount, transferTargetReady, waypointHasTrait,
+  type Guard, type GuardContext,
 } from "../guards/index.js";
 import { cooldownNote, cooldownWakeAt } from "../utils/time.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
-import type { Survey } from "../generated/types.js";
 
 // ---- Cross-system travel ----
 
@@ -58,7 +59,7 @@ registerTool({
 
 registerTool({
   name: "create_survey",
-  description: "Survey current waypoint for richer extraction yields (needs SURVEYOR mount; auto-orbits if docked). Returns surveys usable by extract_with_survey. Starts the ship's cooldown, so the same ship cannot extract until it ends (harness auto-wakes); survey with one ship and extract with another to avoid waiting.",
+  description: "Survey current waypoint for richer extraction yields (needs SURVEYOR mount; auto-orbits if docked). Returns survey signatures to pass to extract_with_survey; the harness keeps the surveys until they expire. Starts the ship's cooldown, so the same ship cannot extract until it ends (harness auto-wakes); survey with one ship and extract with another to avoid waiting.",
   kind: "action",
   input: z.object({ shipSymbol: z.string() }),
   guards: [knownShip, notInTransit, cooldownClear, shipHasMount("MOUNT_SURVEYOR")],
@@ -68,27 +69,49 @@ registerTool({
     await ensureOrbit(shipSymbol, ship);
     const { data } = await api.createSurvey(shipSymbol);
     if (ship && data.cooldown) upsertShip({ ...ship, cooldown: data.cooldown });
-    const surveys = data.surveys ?? [];
+    const found = data.surveys ?? [];
+    surveys.add(found);
     return {
-      summary: `${shipSymbol} surveyed ${surveys.length} deposits (${surveys.map(s => s.symbol).join(", ")})${cooldownNote(data.cooldown)}`,
-      result: surveys,
+      summary: `${shipSymbol} surveyed ${found.length} deposits (${found.map(s => s.signature).join(", ")})${cooldownNote(data.cooldown)}`,
+      result: found.map(compactSurvey),
       followUpWakeAt: cooldownWakeAt(data.cooldown),
       followUpReason: `${shipSymbol} survey cooldown done`,
     };
   },
 });
 
+// The survey must still be stored (not expired) and be for the ship's waypoint.
+const surveyUsable: Guard = Object.defineProperty(async (_name: string, ctx: GuardContext) => {
+  const signature = String(ctx.args["surveySignature"]);
+  const survey = surveys.get(signature);
+  if (!survey) {
+    const live = surveys.active().map(s => `${s.signature} @ ${s.symbol}`);
+    return { ok: false, reason: `no live survey ${signature} (expired or unknown); live surveys: ${live.join(", ") || "none"}` };
+  }
+  const ship = await ctx.fresh.ship(String(ctx.args["shipSymbol"]));
+  if (ship && ship.nav.waypointSymbol !== survey.symbol) {
+    return { ok: false, reason: `survey ${signature} is for ${survey.symbol}, ship is at ${ship.nav.waypointSymbol}` };
+  }
+  return { ok: true };
+}, "name", { value: "surveyUsable" });
+
 registerTool({
   name: "extract_with_survey",
-  description: "Extract using a survey for better yields (needs MINING_LASER + a survey object from create_survey; auto-orbits if docked).",
+  description: "Extract using a survey for better yields (needs MINING_LASER; auto-orbits if docked). Pass the surveySignature from create_survey; the ship must be at the surveyed waypoint.",
   kind: "action",
-  input: z.object({ shipSymbol: z.string(), survey: surveySchema() }),
-  guards: [knownShip, notInTransit, cooldownClear, shipHasMount("MOUNT_MINING_LASER")],
+  input: z.object({ shipSymbol: z.string(), surveySignature: z.string() }),
+  guards: [knownShip, notInTransit, cooldownClear, shipHasMount("MOUNT_MINING_LASER"), surveyUsable],
   rateCost: 2,
-  handler: async ({ shipSymbol, survey }, ctx) => {
+  handler: async ({ shipSymbol, surveySignature }, ctx) => {
+    const survey = surveys.get(surveySignature);
+    if (!survey) throw new Error(`survey ${surveySignature} expired`);
     const ship = await ctx.fresh.ship(shipSymbol);
     await ensureOrbit(shipSymbol, ship);
-    const { data } = await api.extractWithSurvey(shipSymbol, survey as Survey);
+    const { data } = await api.extractWithSurvey(shipSymbol, survey).catch((err: unknown) => {
+      // An exhausted or expired survey can never be used again.
+      if (err instanceof Error && /exhausted|expired/i.test(err.message)) surveys.remove(surveySignature);
+      throw err;
+    });
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
     return {
       summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol} (surveyed), cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}`,
@@ -98,16 +121,6 @@ registerTool({
     };
   },
 });
-
-function surveySchema() {
-  return z.object({
-    signature: z.string(),
-    symbol: z.string(),
-    deposits: z.array(z.string()),
-    expiration: z.string(),
-    size: z.string(),
-  }).passthrough();
-}
 
 // ---- Cargo transfer & refining ----
 

@@ -99,9 +99,9 @@ const cooldownClear:   Guard
 | `warp` / `jump` | `POST .../warp`, `.../jump` | warp drive / jump gate + antimatter in cargo |
 | `dock` / `orbit` | `POST .../dock`, `.../orbit` | nav-state transitions |
 | `refuel` | `POST .../refuel` | docked, market sells fuel, credits |
-| `extract` / `extract_with_survey` | `POST .../extract[/survey]` | in orbit, mining mount, cooldown clear |
+| `extract` / `extract_with_survey` | `POST .../extract[/survey]` | in orbit, mining mount, cooldown clear; with survey: live stored survey for this waypoint, passed by signature |
 | `siphon` | `POST .../siphon` | in orbit, gas siphon mount, cooldown clear |
-| `create_survey` | `POST .../survey` | in orbit, surveyor mount, cooldown clear |
+| `create_survey` | `POST .../survey` | in orbit, surveyor mount, cooldown clear; harness stores surveys until expiry |
 | `buy_cargo` | `POST .../purchase` | docked at marketplace, sells good, trade volume, cargo space, credits |
 | `sell_cargo` | `POST .../sell` | docked at marketplace, buys good, cargo present |
 | `transfer_cargo` | `POST .../transfer` | ships co-located, neither in transit, space in target; sender auto-docks/orbits to match receiver |
