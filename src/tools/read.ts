@@ -4,6 +4,7 @@ import { mirror, mergeSystemWaypoints, storeKeys, upsertShip } from "../state/st
 import { refreshAgent, refreshContracts, refreshFleet, fetchMarket, paginate } from "../state/refresh.js";
 import { registerTool } from "./registry.js";
 import { systemOf } from "../utils/symbols.js";
+import { shipyards } from "../state/shipyards.js";
 import type { System, Waypoint, Faction, Shipyard } from "../generated/types.js";
 import { WaypointTraitSymbolValues } from "../generated/types.js";
 import { compactShip } from "../state/projections.js";
@@ -160,7 +161,7 @@ registerTool({
 
 registerTool({
   name: "get_shipyard",
-  description: "Shipyard at a waypoint: ship types sold, modification fee, transactions. Always fresh from the API.",
+  description: "Shipyard at a waypoint: ship types sold, and prices/specs when one of your ships is present there. Prices seen are remembered (working memory economy.knownShipOffers). Always fresh from the API.",
   kind: "read",
   input: z.object({ waypointSymbol: z.string() }),
   rateCost: 1,
@@ -168,7 +169,12 @@ registerTool({
     const system = systemOf(waypointSymbol);
     const { data } = await api.getShipyard(system, waypointSymbol);
     mirror.set(storeKeys.market(system, waypointSymbol) + ":shipyard", data);
-    return { summary: `${waypointSymbol} sells: ${(data.shipTypes ?? []).map(t => t.type).join(", ")}`, result: data };
+    shipyards.record(data);
+    const priced = (data.ships ?? []).map(s => `${s.type}=${s.purchasePrice}`);
+    return {
+      summary: `${waypointSymbol} sells: ${priced.length ? priced.join(", ") : `${(data.shipTypes ?? []).map(t => t.type).join(", ")} (prices hidden — no ship of yours here)`}`,
+      result: data,
+    };
   },
 });
 

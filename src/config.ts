@@ -29,6 +29,10 @@ export const config = {
   agent: {
     policy: (process.env.AGENT_POLICY === "readonly" ? "readonly" : "full") as AgentPolicy,
     maxActionsPerWake: num("AGENT_MAX_ACTIONS_PER_WAKE", 8),
+    // Action budget scales with fleet size so every ship can get a full job per wake.
+    actionsPerShip: num("AGENT_ACTIONS_PER_SHIP", 6),
+    // Credits the agent must keep on hand (fuel, cargo capital); ship purchases may not dip below it.
+    creditReserve: num("AGENT_CREDIT_RESERVE", 25_000),
     maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 32),
     maxConcurrentTools: num("AGENT_MAX_CONCURRENT_TOOLS", 3),
     wakeTimeoutMs: num("AGENT_WAKE_TIMEOUT_MS", 180_000),

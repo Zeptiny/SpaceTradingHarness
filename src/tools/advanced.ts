@@ -7,6 +7,7 @@ import {
   notInTransit, shipHasModule, shipHasMount, waypointHasTrait,
 } from "../guards/index.js";
 import { cooldownWakeAt } from "../utils/time.js";
+import { ensureDocked, ensureOrbit } from "./navstate.js";
 import type { Survey } from "../generated/types.js";
 
 // ---- Cross-system travel ----
@@ -55,14 +56,15 @@ registerTool({
 
 registerTool({
   name: "create_survey",
-  description: "Survey current waypoint for richer extraction yields (needs orbit + SURVEYOR mount). Returns surveys usable by extract_with_survey.",
+  description: "Survey current waypoint for richer extraction yields (needs SURVEYOR mount; auto-orbits if docked). Returns surveys usable by extract_with_survey.",
   kind: "action",
   input: z.object({ shipSymbol: z.string() }),
-  guards: [knownShip, inOrbit, cooldownClear, shipHasMount("MOUNT_SURVEYOR")],
+  guards: [knownShip, notInTransit, cooldownClear, shipHasMount("MOUNT_SURVEYOR")],
   rateCost: 2,
   handler: async ({ shipSymbol }, ctx) => {
-    const { data } = await api.createSurvey(shipSymbol);
     const ship = await ctx.fresh.ship(shipSymbol);
+    await ensureOrbit(shipSymbol, ship);
+    const { data } = await api.createSurvey(shipSymbol);
     if (ship && data.cooldown) upsertShip({ ...ship, cooldown: data.cooldown });
     const surveys = data.surveys ?? [];
     return {
@@ -76,14 +78,15 @@ registerTool({
 
 registerTool({
   name: "extract_with_survey",
-  description: "Extract using a survey for better yields (needs orbit + MINING_LASER + a survey object from create_survey).",
+  description: "Extract using a survey for better yields (needs MINING_LASER + a survey object from create_survey; auto-orbits if docked).",
   kind: "action",
   input: z.object({ shipSymbol: z.string(), survey: surveySchema() }),
-  guards: [knownShip, inOrbit, cooldownClear, shipHasMount("MOUNT_MINING_LASER")],
+  guards: [knownShip, notInTransit, cooldownClear, shipHasMount("MOUNT_MINING_LASER")],
   rateCost: 2,
   handler: async ({ shipSymbol, survey }, ctx) => {
-    const { data } = await api.extractWithSurvey(shipSymbol, survey as Survey);
     const ship = await ctx.fresh.ship(shipSymbol);
+    await ensureOrbit(shipSymbol, ship);
+    const { data } = await api.extractWithSurvey(shipSymbol, survey as Survey);
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
     return {
       summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol} (surveyed)`,
@@ -150,13 +153,15 @@ registerTool({
 
 registerTool({
   name: "negotiate_contract",
-  description: "Negotiate a new contract offer (ship must be docked at a faction waypoint).",
+  description: "Negotiate a new contract offer (ship must be at a faction waypoint, e.g. HQ; auto-docks if in orbit). Only works when you have no active contract.",
   kind: "action",
   input: z.object({ shipSymbol: z.string() }),
-  guards: [knownShip, isDocked],
+  guards: [knownShip, notInTransit],
   rateCost: 2,
-  handler: async ({ shipSymbol }) => {
+  handler: async ({ shipSymbol }, ctx) => {
+    await ensureDocked(shipSymbol, await ctx.fresh.ship(shipSymbol));
     const { data } = await api.negotiateContract(shipSymbol);
+    mirror.invalidate(storeKeys.contracts);
     return { summary: `negotiated contract ${data.contract.id.slice(0, 8)} (${data.contract.type})`, result: data.contract };
   },
 });

@@ -1,4 +1,4 @@
-import type { Agent, Market, Ship, ShipNavStatus, Waypoint } from "../generated/types.js";
+import type { Agent, Market, Ship, ShipNavStatus, Shipyard, Waypoint } from "../generated/types.js";
 import { systemOf } from "../utils/symbols.js";
 
 /**
@@ -11,6 +11,7 @@ export interface FreshReader {
   ship(symbol: string): Promise<Ship | undefined>;
   market(systemSymbol: string, waypointSymbol: string): Promise<Market | undefined>;
   waypoint(systemSymbol: string, waypointSymbol: string): Promise<Waypoint | undefined>;
+  shipyard(systemSymbol: string, waypointSymbol: string): Promise<Shipyard | undefined>;
   agent(): Promise<Agent | undefined>;
 }
 
@@ -193,5 +194,35 @@ export const hasCredits = (min: number): Guard => async (_name, ctx) => {
   }
   if (!agent) return { ok: true, reason: "credit balance unknown (allowed)" };
   if (agent.credits < min) return { ok: false, reason: `credits ${agent.credits} < required ${min}` };
+  return { ok: true };
+};
+
+// Ship purchase check: the shipyard only lists prices while one of our ships
+// is there (which the API also requires to buy), and the purchase must leave
+// at least `reserve` credits for fuel and cargo capital.
+export const canBuyShip = (reserve: number): Guard => async (_name, ctx) => {
+  const type = ctx.args["shipType"];
+  const wSym = ctx.args["waypointSymbol"];
+  if (typeof type !== "string" || typeof wSym !== "string") return { ok: false, reason: "missing shipType/waypointSymbol arg" };
+  const yard = await ctx.fresh.shipyard(systemOf(wSym), wSym);
+  if (!yard) return { ok: false, reason: `no shipyard at ${wSym}` };
+  if (!yard.shipTypes.some(t => t.type === type)) {
+    return { ok: false, reason: `${wSym} does not sell ${type} (sells ${yard.shipTypes.map(t => t.type).join(", ")})` };
+  }
+  const offer = yard.ships?.find(s => s.type === type);
+  if (!offer) return { ok: false, reason: `none of your ships is at ${wSym} — navigate one there first (required to buy and to see prices)` };
+  let agent: Agent | undefined;
+  try {
+    agent = await ctx.fresh.agent();
+  } catch {
+    agent = undefined;
+  }
+  if (!agent) return { ok: false, reason: "credit balance unavailable — retry" };
+  if (agent.credits - offer.purchasePrice < reserve) {
+    return {
+      ok: false,
+      reason: `${type} costs ${offer.purchasePrice}; credits ${agent.credits} would drop below the ${reserve} reserve (need ${offer.purchasePrice + reserve})`,
+    };
+  }
   return { ok: true };
 };
