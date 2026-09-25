@@ -195,6 +195,7 @@ registerTool({
   handler: async ({ waypointSymbol }) => {
     const system = systemOf(waypointSymbol);
     const { data } = await api.getJumpGate(system, waypointSymbol);
+    atlas.recordGate(data, system);
     return { summary: `${waypointSymbol} gate → ${(data.connections ?? []).join(", ") || "none"}`, result: data };
   },
 });
@@ -208,6 +209,7 @@ registerTool({
   handler: async ({ waypointSymbol }) => {
     const system = systemOf(waypointSymbol);
     const { data } = await api.getConstruction(system, waypointSymbol);
+    atlas.recordConstruction(data);
     return { summary: `${waypointSymbol} construction${data.isComplete ? " (complete)" : ""}: ${(data.materials ?? []).map(m => `${m.tradeSymbol}:${m.fulfilled}/${m.required}`).join(" ")}`, result: data };
   },
 });

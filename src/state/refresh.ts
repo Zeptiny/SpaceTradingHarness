@@ -72,6 +72,7 @@ export async function fetchMarket(systemSymbol: string, waypointSymbol: string):
   });
   mirror.set(storeKeys.market(systemSymbol, waypointSymbol), data);
   prices.record(data);
+  atlas.recordMarket(data);
   return data;
 }
 
@@ -97,6 +98,10 @@ export async function fetchShipyard(systemSymbol: string, waypointSymbol: string
  * waypoints are looked up once (traits are static per reset). Failures are
  * skipped silently — this is best-effort enrichment.
  */
+// Wake-start scans skip what the background collector (or an earlier wake) read moments ago.
+const WAKE_PRICE_FRESH_MS = 2 * 60_000;
+const WAKE_SHIPYARD_FRESH_MS = 30 * 60_000;
+
 export async function scanShipLocations(ships: Ship[], maxRequests: number): Promise<{ markets: string[]; shipyards: string[] }> {
   const out = { markets: [] as string[], shipyards: [] as string[] };
   const locations = [...new Set(ships.filter(s => s.nav.status !== "IN_TRANSIT").map(s => s.nav.waypointSymbol))];
@@ -111,12 +116,14 @@ export async function scanShipLocations(ships: Ship[], maxRequests: number): Pro
         await fetchWaypoint(system, wp);
         known = atlas.get(wp);
       }
-      if (budget > 0 && known?.traits.includes("MARKETPLACE")) {
+      const pricedAt = prices.marketsSeen().get(wp);
+      if (budget > 0 && known?.traits.includes("MARKETPLACE") && !(pricedAt && Date.now() - pricedAt < WAKE_PRICE_FRESH_MS)) {
         budget--;
         await fetchMarket(system, wp);
         out.markets.push(wp);
       }
-      if (budget > 0 && known?.traits.includes("SHIPYARD")) {
+      const yardSeenAt = shipyards.seenAt(wp);
+      if (budget > 0 && known?.traits.includes("SHIPYARD") && !(yardSeenAt && Date.now() - yardSeenAt < WAKE_SHIPYARD_FRESH_MS)) {
         budget--;
         await fetchShipyard(system, wp);
         out.shipyards.push(wp);

@@ -106,6 +106,7 @@ function makeFreshReader(): FreshReader {
         const { data } = await api.getMarket(system, wp);
         mirror.set(storeKeys.market(system, wp), data);
         prices.record(data);
+        atlas.recordMarket(data);
         return data;
       } catch (err) {
         if (isNotFound(err)) return undefined;

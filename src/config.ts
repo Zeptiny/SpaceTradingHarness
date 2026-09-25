@@ -43,6 +43,9 @@ export const config = {
     creditReserve: num("AGENT_CREDIT_RESERVE", 25_000),
     // API requests the wake-start collector may spend reading markets/shipyards where ships sit (0 disables).
     autoScanRequests: num("AGENT_AUTO_SCAN_REQUESTS", 8),
+    // Background collector while the agent sleeps: maps systems, refreshes parked-ship prices, reads jump gates (0 disables).
+    collectorIntervalMs: num("AGENT_COLLECTOR_INTERVAL_MS", 120_000),
+    collectorRequests: num("AGENT_COLLECTOR_REQUESTS", 6),
     maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 32),
     maxConcurrentTools: num("AGENT_MAX_CONCURRENT_TOOLS", 3),
     fallbackWakeMs: num("AGENT_FALLBACK_WAKE_MS", 10 * 60_000),
