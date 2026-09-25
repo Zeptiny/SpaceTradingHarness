@@ -24,7 +24,7 @@ npm run smoke         # API + LLM round-trip test (read-only)
 npm start             # harness + panel at http://127.0.0.1:8787
 ```
 
-Requires `.env` with `API_TOKEN`, `OPENAI_API_URL`, `OPENAI_API_KEY`, `LLM_MODEL`.
+Requires `.env` with `API_TOKEN`, `OPENAI_API_URL`, `OPENAI_API_KEY`, `LLM_MODEL`. Start from the template: `cp .env.example .env`.
 
 Env knobs (optional): `AGENT_POLICY=readonly` (block all mutating tools), `AGENT_MAX_ACTIONS_PER_WAKE` (floor; the budget is max of this and `AGENT_ACTIONS_PER_SHIP` × fleet size, default 6), `AGENT_CREDIT_RESERVE` (credits ship purchases may not dip below, default 25000), `AGENT_AUTO_SCAN_REQUESTS` (API requests spent at each wake start reading markets/shipyards where ships sit, default 8, 0 disables), `AGENT_MAX_ROUNDS_PER_WAKE`, `AGENT_MAX_CONCURRENT_TOOLS`, `AGENT_WAKE_TIMEOUT_MS`, `AGENT_FALLBACK_WAKE_MS`, `AGENT_MIN_WAKE_GAP_MS`, `PANEL_PORT`, `PANEL_HOST` (default 127.0.0.1), `TRANSPORT_MIN_INTERVAL_MS`, `TRANSPORT_TIMEOUT_MS`, `LLM_TIMEOUT_MS`.
 
