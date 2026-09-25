@@ -10,6 +10,7 @@ import { atlas } from "../state/atlas.js";
 import { routines, describeSpec } from "../state/routines.js";
 import { countRequests, SpaceTradersError } from "../transport/http.js";
 import { getTool, type ToolContext } from "./registry.js";
+import { ShipLocks } from "./shipLocks.js";
 import type { FreshReader, GuardResult } from "../guards/index.js";
 import type { Market, Ship, Shipyard, Waypoint } from "../generated/types.js";
 
@@ -22,45 +23,14 @@ export interface ExecOutcome {
   followUpReason?: string | undefined;
 }
 
-const LOCK_TIMEOUT_MS = 30_000;
-
-class ShipLocks {
-  private tails = new Map<string, Promise<unknown>>();
-
-  acquire(symbol: string): Promise<() => void> {
-    const prev = this.tails.get(symbol) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>(res => {
-      release = res;
-    });
-    const next = prev.then(() => gate);
-    this.tails.set(symbol, next);
-    void next.catch(() => undefined).then(() => {
-      if (this.tails.get(symbol) === next) this.tails.delete(symbol);
-    });
-    return prev.then(() => release);
-  }
-}
+// A ship's lock is held for a whole tool call, including its wait in the
+// shared request queue, and with a big fleet that wait alone can run past a
+// minute (see the routine steps' durations in the activity log).
+const LOCK_TIMEOUT_MS = 180_000;
 
 const locks = new ShipLocks();
 
-const shipLock = (symbol: string) => withTimeout(locks.acquire(symbol), LOCK_TIMEOUT_MS, `ship lock timeout for ${symbol}`);
-
-function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(msg)), ms);
-    p.then(
-      v => {
-        clearTimeout(timer);
-        resolve(v);
-      },
-      err => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
-}
+const shipLock = (symbol: string, label?: string) => locks.acquire(symbol, LOCK_TIMEOUT_MS, label);
 
 // Per-tool-call fresh reader: every resource is fetched live from the API and
 // memoized only for the duration of a single tool call (guards + handler
@@ -140,7 +110,9 @@ export interface ExecOptions {
   source?: "agent" | "routine";
 }
 
-// Tools the agent may call on a ship while it runs a routine.
+// Tools the agent may call on a ship while it runs a routine. They only change
+// the routine record, so they skip the ship lock: a routine step can hold it
+// for a long time, and cancelling must not queue behind the step it cancels.
 const ROUTINE_CONTROL = new Set(["assign_routine", "cancel_routine"]);
 
 export async function executeTool(name: string, rawArgs: unknown, opts: ExecOptions = {}): Promise<ExecOutcome> {
@@ -189,7 +161,7 @@ export async function executeTool(name: string, rawArgs: unknown, opts: ExecOpti
       // Lock first, then guards: guards fetch live state, so they must run
       // inside the ship's critical section or a queued call would validate
       // against pre-action state.
-      if (shipSymbol) lock.release = await shipLock(shipSymbol);
+      if (shipSymbol && !ROUTINE_CONTROL.has(name)) lock.release = await shipLock(shipSymbol, source === "routine" ? `routine ${name}` : name);
       for (const guard of tool.guards ?? []) {
         const g: GuardResult = await guard(tool.name, { args, fresh });
         guardResults.push({ guard: guard.name, ok: g.ok, reason: g.reason });
