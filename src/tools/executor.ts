@@ -4,10 +4,11 @@ import { activity } from "../state/activity.js";
 import { api } from "../client/index.js";
 import { mergeSystemWaypoints, mirror, storeKeys, upsertShip } from "../state/store.js";
 import { prices } from "../state/prices.js";
+import { shipyards } from "../state/shipyards.js";
 import { SpaceTradersError } from "../transport/http.js";
 import { getTool, type ToolContext } from "./registry.js";
 import type { FreshReader, GuardResult } from "../guards/index.js";
-import type { Market, Ship, Waypoint } from "../generated/types.js";
+import type { Market, Ship, Shipyard, Waypoint } from "../generated/types.js";
 
 export interface ExecOutcome {
   tool: string;
@@ -65,6 +66,7 @@ function makeFreshReader(): FreshReader {
   const shipMemo = new Map<string, Promise<Ship | undefined>>();
   const wpMemo = new Map<string, Promise<Waypoint | undefined>>();
   const mktMemo = new Map<string, Promise<Market | undefined>>();
+  const yardMemo = new Map<string, Promise<Shipyard | undefined>>();
   const isNotFound = (err: unknown): boolean => err instanceof SpaceTradersError && err.status === 404;
 
   const memo = <K, V>(m: Map<K, Promise<V>>, k: K, make: () => Promise<V>): Promise<V> => {
@@ -102,6 +104,17 @@ function makeFreshReader(): FreshReader {
         const { data } = await api.getMarket(system, wp);
         mirror.set(storeKeys.market(system, wp), data);
         prices.record(data);
+        return data;
+      } catch (err) {
+        if (isNotFound(err)) return undefined;
+        throw err;
+      }
+    }),
+    shipyard: (system, wp) => memo(yardMemo, `${system}:${wp}`, async () => {
+      try {
+        const { data } = await api.getShipyard(system, wp);
+        mirror.set(storeKeys.market(system, wp) + ":shipyard", data);
+        shipyards.record(data);
         return data;
       } catch (err) {
         if (isNotFound(err)) return undefined;

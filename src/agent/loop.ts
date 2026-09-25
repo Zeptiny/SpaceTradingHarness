@@ -10,21 +10,32 @@ import { getTool, toolSpecs } from "../tools/registry.js";
 import { executeTool, type ExecOutcome } from "../tools/executor.js";
 import { scheduler, type Wakeup } from "./scheduler.js";
 import { chat, extractJson, type ChatMessage } from "./llm.js";
-import { compactShip } from "../state/projections.js";
-import type { Agent, Contract } from "../generated/types.js";
+import { compactShip, contractSummary } from "../state/projections.js";
+import { shipyards } from "../state/shipyards.js";
+import type { Agent, Contract, Ship } from "../generated/types.js";
 
 const SYSTEM_PROMPT = `You are the decision core of a SpaceTraders agent. You control a fleet of ships via tools. You are fully autonomous — no human will approve or intervene.
+
+Mission: grow the fleet and the income rate as fast as possible. Net worth (ships + credits) is the score, not the bank balance. Credits sitting above the reserve are idle capital — convert them into ships that earn.
 
 How you work:
 - Reason freely in your reply text. Act by calling tools — batch as many as you like per turn; the harness executes them with bounded concurrency and rate-limits the API for you. Results come back each round and you think again.
 - This conversation is your working memory for the whole wake: every tool call and result stays in context. Before re-fetching data, check what you already have — identical repeat reads are answered from cache without hitting the API.
 - You decide when the wake ends: call end_loop when there is nothing more worth doing — optionally with wakeAt (ISO) to choose the next wake time. Ship arrivals and cooldowns are auto-scheduled from tool results regardless.
-- Guards fail locally at zero cost — read the reason and adapt (dock/orbit first, fetch market/waypoint data, refuel).
+- Guards fail locally at zero cost — read the reason and adapt (fetch market/waypoint data, refuel, move a ship to the shipyard).
+
+Strategy:
+- Every ship works, every wake. Working memory tags each ship's state; any ship marked IDLE needs a job this wake (a probe you deliberately parked at a market or shipyard counts as working). Plan all ships together and batch their calls in the same turn — ships run in parallel, and an idle ship is lost income. Don't end the wake while a ship is idle and you can still act.
+- Contracts: the game allows only ONE active contract at a time, so contracts can't scale. The moment one is fulfilled, negotiate the next (negotiate_contract with a ship at a faction waypoint, e.g. HQ) and accept it if it pays. Give contract work to one ship; the rest of the fleet earns elsewhere.
+- Parallel income: (1) Trading — buy where a good is EXPORTed cheap, sell where it is IMPORTed dear; check tradeVolume per transaction and that margin × units clearly beats fuel. (2) Mining — mining drones / ore hounds extract at asteroid fields and sell (or hand off via transfer_cargo to a hauler). (3) Probes — cheap ships parked at markets and shipyards keep prices visible without spending fuel.
+- Invest continuously. When economy.investable covers a ship's price, buy one. Default order when unsure: 1–2 probes early to map markets and shipyards; then light haulers for trading once you know a profitable route, or mining drones if an asteroid field with nearby buyers exists. Keep buying while payback looks good. purchase_ship needs one of your ships at the shipyard (that is also how prices get revealed; prices you've seen are in economy.knownShipOffers). Assign every new ship a job in the same wake.
+- Keep the reserve (economy.reserve) for fuel, cargo capital and contract purchases; purchase_ship refuses buys that would dip below it.
+- Track what works: remember() profitable routes (good, buy at, sell at, margin) and ship payback; set_goal for fleet-size and credit targets and complete them as you pass them.
 
 Rules:
-- Use remember() to persist lessons (good trade routes, prices, strategy), set_goal for durable objectives.
 - Contracts: deliver goods then fulfill when complete. Watch deadlines.
-- Manage fuel proactively: refuel before long routes (guards verify live state).`;
+- Manage fuel proactively: refuel before long routes (guards verify live state).
+- Trade, refuel, deliver and negotiate auto-dock; navigate, extract, siphon and survey auto-orbit — no separate dock/orbit call needed.`;
 
 interface WorkingMemory {
   time: string;
@@ -33,8 +44,16 @@ interface WorkingMemory {
   policy: string;
   agent: Agent | null;
   agentAsOf: string | null;
+  economy: {
+    credits: number | null;
+    reserve: number;
+    investable: number | null;
+    fleetSize: number;
+    idleShips: string[];
+    knownShipOffers: { type: string; price: number; waypoint: string; supply: string; seenMinutesAgo: number }[];
+  };
   fleet: { asOf: string; ships: unknown[] };
-  contracts: { asOf: string; items: unknown[] };
+  contracts: { asOf: string; items: unknown[]; closedCount: number };
   goals: unknown[];
   notes: unknown[];
   recentSummaries: unknown[];
@@ -50,12 +69,42 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   if (!contracts) alerts.push("contracts data unavailable (API refresh failed)");
 
   const now = new Date().toISOString();
+  const shipState = (s: Ship): string => {
+    if (s.nav.status === "IN_TRANSIT") return `IN_TRANSIT to ${s.nav.route.destination.symbol} until ${s.nav.route.arrival}`;
+    if (s.cooldown.remainingSeconds > 0) return `COOLDOWN ${s.cooldown.remainingSeconds}s`;
+    return `IDLE (${s.nav.status} at ${s.nav.waypointSymbol})`;
+  };
+  const idleShips = (ships ?? []).filter(s => shipState(s).startsWith("IDLE")).map(s => s.symbol);
+  if (idleShips.length) alerts.push(`${idleShips.length} ship(s) idle: ${idleShips.join(", ")} — give each a job`);
+
+  const reserve = config.agent.creditReserve;
+  const investable = agent ? Math.max(0, agent.credits - reserve) : null;
+  const offers = shipyards.cheapestByType().map(o => ({
+    type: o.type,
+    price: o.price,
+    waypoint: o.waypoint,
+    supply: o.supply,
+    seenMinutesAgo: Math.round((Date.now() - o.ts) / 60_000),
+  }));
+  const affordable = investable === null ? [] : offers.filter(o => o.price <= investable);
+  if (affordable.length) {
+    alerts.push(`investable ${investable} cr covers: ${affordable.map(o => `${o.type} (${o.price} @ ${o.waypoint})`).join(", ")} — buy ships that will earn`);
+  } else if (investable && !offers.length) {
+    alerts.push(`${investable} cr investable but no ship prices known — find SHIPYARD waypoints (get_system_waypoints traitFilter SHIPYARD) and send a ship to read prices`);
+  }
+
   for (const s of ships ?? []) {
     if (s.fuel && s.fuel.capacity > 0 && s.fuel.current / s.fuel.capacity < 0.2) {
       alerts.push(`${s.symbol} fuel low (${s.fuel.current}/${s.fuel.capacity})`);
     }
   }
-  for (const c of contracts ?? []) {
+  const isOpen = (c: Contract) => !c.fulfilled && !(c.accepted && Date.parse(c.terms.deadline) < Date.now())
+    && !(!c.accepted && c.deadlineToAccept && Date.parse(c.deadlineToAccept) < Date.now());
+  const openContracts = (contracts ?? []).filter(isOpen);
+  if (contracts && !openContracts.length) {
+    alerts.push("no open contract — negotiate one (negotiate_contract with a ship at a faction waypoint)");
+  }
+  for (const c of openContracts) {
     if (c.accepted && !c.fulfilled) {
       const terms = (c.terms as Contract["terms"]);
       const remaining = (terms.deliver ?? []).filter(d => d.unitsFulfilled < d.unitsRequired).length;
@@ -73,13 +122,22 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     policy: config.agent.policy,
     agent: agent ?? null,
     agentAsOf: agent ? now : null,
+    economy: {
+      credits: agent?.credits ?? null,
+      reserve,
+      investable,
+      fleetSize: ships?.length ?? 0,
+      idleShips,
+      knownShipOffers: offers,
+    },
     fleet: {
       asOf: ships ? now : "unavailable",
-      ships: (ships ?? []).map(compactShip),
+      ships: (ships ?? []).map(s => ({ state: shipState(s), ...compactShip(s) })),
     },
     contracts: {
       asOf: contracts ? now : "unavailable",
-      items: contracts ?? [],
+      items: openContracts.map(contractSummary),
+      closedCount: (contracts?.length ?? 0) - openContracts.length,
     },
     goals: memory.activeGoals(),
     notes: memory.recall(undefined, undefined, 8).map(n => ({ id: n.id, kind: n.kind, content: n.content, tags: n.tags })),
@@ -220,10 +278,12 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
     const messages: ChatMessage[] = [{ role: "system", content: SYSTEM_PROMPT }];
     const readCache = new Map<string, unknown>();
     let plan: AgentPlan | null = null;
+    // Sized once the fleet is known (round 0) so each ship can get a full job.
     let actionsLeft = config.agent.maxActionsPerWake;
     let consecutiveFailures = 0;
     let noCallRounds = 0;
     const wakeStart = Date.now();
+    let wakeBudgetMs = config.agent.wakeTimeoutMs;
 
     const runCall = async (call: PlannedCall): Promise<ExecOutcome> => {
       const def = getTool(call.tool);
@@ -247,8 +307,8 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
 
     let round = 0;
     while (round < config.agent.maxRoundsPerWake && actionsLeft > 0) {
-      if (Date.now() - wakeStart > config.agent.wakeTimeoutMs) {
-        activity.append({ kind: "system", text: `wake wall-clock budget (${config.agent.wakeTimeoutMs}ms) exhausted` });
+      if (Date.now() - wakeStart > wakeBudgetMs) {
+        activity.append({ kind: "system", text: `wake wall-clock budget (${wakeBudgetMs}ms) exhausted` });
         break;
       }
       // Working memory seeds the conversation once per wake; afterwards the
@@ -257,7 +317,11 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       if (round === 0) {
         let wmString: string;
         try {
-          wmString = JSON.stringify(await buildWorkingMemory(wakeup.reason), null, 1);
+          const wm = await buildWorkingMemory(wakeup.reason);
+          actionsLeft = Math.max(config.agent.maxActionsPerWake, config.agent.actionsPerShip * wm.economy.fleetSize);
+          // Rate-limited API calls for a larger fleet take longer; scale the wall clock with the budget.
+          wakeBudgetMs = Math.max(config.agent.wakeTimeoutMs, (config.agent.wakeTimeoutMs / config.agent.maxActionsPerWake) * actionsLeft);
+          wmString = JSON.stringify(wm, null, 1);
         } catch (err) {
           activity.append({ kind: "system", text: `working memory refresh failed: ${err instanceof Error ? err.message : err}` });
           break;
