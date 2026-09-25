@@ -8,7 +8,7 @@ import {
 } from "../guards/index.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
 import { config } from "../config.js";
-import { cooldownNote, cooldownWakeAt, etaWakeAt } from "../utils/time.js";
+import { cooldownNote, cooldownWakeAt, etaWakeAt, stamp } from "../utils/time.js";
 import { compactCargo, compactShip, contractSummary } from "../state/projections.js";
 import { ledger } from "../state/ledger.js";
 import { ShipTypeValues, type ShipNavFlightMode } from "../generated/types.js";
@@ -84,7 +84,7 @@ registerTool({
     if (ship) upsertShip({ ...ship, nav: data.nav, fuel: data.fuel });
     expectArrival(shipSymbol, waypointSymbol, data.nav.route?.arrival);
     return {
-      summary: `${shipSymbol} in transit to ${waypointSymbol} (${data.nav.flightMode}), fuel ${data.fuel.current}/${data.fuel.capacity}${refueled ? `; ${refueled} before leaving` : ""}`,
+      summary: `${shipSymbol} in transit to ${waypointSymbol} (${data.nav.flightMode}), arrives ${stamp(data.nav.route?.arrival)}, fuel ${data.fuel.current}/${data.fuel.capacity}${refueled ? `; ${refueled} before leaving` : ""}`,
       result: { nav: data.nav, fuel: data.fuel },
       followUpWakeAt: etaWakeAt(data.nav),
       followUpReason: `${shipSymbol} arrival at ${waypointSymbol}`,
