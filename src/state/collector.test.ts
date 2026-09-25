@@ -87,3 +87,17 @@ test("gate summary: construction progress and scouted neighbors nearest first", 
 test("gate summary is empty for a system without a known gate", () => {
   assert.deepEqual(summarizeGates(empty(), ["X1-A"]), []);
 });
+
+test("atlas keeps waypoint modifiers from listings and extractions", async () => {
+  const { atlas } = await import("./atlas.js");
+  const wp = (modifiers?: { symbol: string }[], traits = [{ symbol: "COMMON_METAL_DEPOSITS" }]) =>
+    ({ symbol: "ZM-SYS-AST1", systemSymbol: "ZM-SYS", type: "ENGINEERED_ASTEROID", x: 1, y: 2, traits, modifiers, orbitals: [] }) as unknown as import("../generated/types.js").Waypoint;
+  atlas.record([wp([{ symbol: "STRIPPED" }])]);
+  assert.deepEqual(atlas.get("ZM-SYS-AST1")?.modifiers, ["STRIPPED"]);
+  assert.deepEqual(atlas.summary(["ZM-SYS"])[0]?.waypoints[0]?.modifiers, ["STRIPPED"]);
+  // A trait-less record (scanned from afar) leaves known modifiers alone.
+  atlas.record([wp(undefined, [])]);
+  assert.deepEqual(atlas.get("ZM-SYS-AST1")?.modifiers, ["STRIPPED"]);
+  atlas.recordModifiers("ZM-SYS-AST1", []);
+  assert.equal(atlas.get("ZM-SYS-AST1")?.modifiers, undefined);
+});

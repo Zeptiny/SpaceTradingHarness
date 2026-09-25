@@ -52,3 +52,35 @@ test("trend counts ship purchases as earnings, not losses", () => {
 test("trend is null with a single sample", () => {
   assert.equal(computeTrend([{ ts: now, credits: 1, fleetSize: 1 }], [], 3600_000, now), null);
 });
+
+test("trade leads carry supply at both ends and other agents' traffic on the route", () => {
+  const leads = computeTradeLeads([
+    { ...pt("A", "IRON", 50, 40, "EXPORT", 20), supply: "SCARCE" },
+    { ...pt("B", "IRON", 120, 100, "IMPORT", 10), supply: "ABUNDANT" },
+    pt("A", "COPPER", 30, 25, "EXPORT"),
+    pt("C", "COPPER", 45, 40, "IMPORT"),
+  ], { now, competition: (good, buyAt, sellAt) => (good === "IRON" && buyAt === "A" && sellAt === "B" ? 60 : null) });
+  const iron = leads.find(l => l.good === "IRON")!;
+  assert.equal(iron.buySupply, "SCARCE");
+  assert.equal(iron.sellSupply, "ABUNDANT");
+  assert.equal(iron.othersTradedLastHour, 60);
+  assert.equal(leads.find(l => l.good === "COPPER")!.othersTradedLastHour, undefined);
+});
+
+test("route competition counts other agents' buys at the source and sells at the sink, not ours", async () => {
+  const { prices, routeCompetition } = await import("./prices.js");
+  const t = Date.parse("2026-09-25T12:00:00Z");
+  const tx = (wp: string, ship: string, type: "PURCHASE" | "SELL", units: number, minsAgo: number) => ({
+    waypointSymbol: wp, shipSymbol: ship, tradeSymbol: "ZINC", type, units, pricePerUnit: 10, totalPrice: 10 * units,
+    timestamp: new Date(t - minsAgo * 60_000).toISOString(),
+  });
+  const market = (wp: string, transactions: ReturnType<typeof tx>[]) =>
+    ({ symbol: wp, exports: [], imports: [], exchange: [], tradeGoods: [], transactions }) as unknown as import("../generated/types.js").Market;
+  prices.record(market("ZX-SRC", [tx("ZX-SRC", "RIVAL-1", "PURCHASE", 30, 10), tx("ZX-SRC", "ME-1", "PURCHASE", 40, 5), tx("ZX-SRC", "RIVAL-2", "SELL", 99, 5), tx("ZX-SRC", "RIVAL-1", "PURCHASE", 7, 90)]), t);
+  // The same transaction listed again on the next read is not double-counted.
+  prices.record(market("ZX-SRC", [tx("ZX-SRC", "RIVAL-1", "PURCHASE", 30, 10)]), t);
+  prices.record(market("ZX-DST", [tx("ZX-DST", "RIVAL-3", "SELL", 20, 30)]), t);
+  const competition = routeCompetition(s => s.startsWith("ME-"), t);
+  assert.equal(competition("ZINC", "ZX-SRC", "ZX-DST"), 50);
+  assert.equal(competition("ZINC", "ZX-NOWHERE", "ZX-ELSE"), null);
+});

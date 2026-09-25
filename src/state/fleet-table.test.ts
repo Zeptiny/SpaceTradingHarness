@@ -32,3 +32,32 @@ test("fleet table: one line per ship with location, cargo, fuel and readiness", 
   assert.match(lines[1]!, /IN_TRANSIT X1-AA-A1 → X1-AA-B2, arrives in 60s/);
   assert.match(lines[2]!, /cooldown 30s/);
 });
+
+test("fleet table and compact ship flag worn components", async () => {
+  const { compactShip, shipWear } = await import("./projections.js");
+  const worn = ship("S-4", {}, {
+    frame: { symbol: "FRAME_MINER", condition: 0.95, integrity: 0.99 },
+    reactor: { symbol: "REACTOR_X", condition: 0.8, integrity: 0.97 },
+    engine: { symbol: "ENGINE_X", condition: 0.42, integrity: 0.9 },
+    registration: {}, mounts: [], modules: [],
+  } as unknown as Partial<Ship>);
+  assert.deepEqual(shipWear(worn), [
+    { component: "ENGINE", condition: 0.42, integrity: 0.9 },
+    { component: "REACTOR", condition: 0.8, integrity: 0.97 },
+  ]);
+  assert.match(fleetTable([worn], () => undefined, NOW), /\| worn ENGINE 0\.42$/);
+  assert.equal((compactShip(worn) as { wear?: unknown[] }).wear?.length, 2);
+  // Components above the threshold (or missing) show nothing.
+  assert.doesNotMatch(fleetTable([ship("S-5", {})], () => undefined, NOW), /worn/);
+});
+
+test("action incidents: damage events and waypoint modifiers become a summary note", async () => {
+  const { actionIncidents } = await import("./projections.js");
+  assert.deepEqual(actionIncidents([], undefined), { note: "", incidents: {} });
+  const r = actionIncidents(
+    [{ symbol: "THRUSTER_NOZZLE_WEAR", component: "ENGINE", name: "", description: "" }],
+    [{ symbol: "STRIPPED", name: "", description: "" }],
+  );
+  assert.equal(r.note, "; wear: ENGINE THRUSTER_NOZZLE_WEAR; waypoint STRIPPED");
+  assert.deepEqual(r.incidents, { damage: ["ENGINE THRUSTER_NOZZLE_WEAR"], waypointModifiers: ["STRIPPED"] });
+});

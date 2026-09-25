@@ -1,4 +1,4 @@
-import type { Construction, JumpGate, Market, System, Waypoint } from "../generated/types.js";
+import type { Construction, JumpGate, Market, System, Waypoint, WaypointModifier } from "../generated/types.js";
 import { loadJson, saveJsonAtomic, dataFile } from "./persist.js";
 import { systemOf } from "../utils/symbols.js";
 
@@ -18,6 +18,8 @@ export interface KnownWaypoint {
   y: number;
   traits: string[];
   underConstruction?: boolean | undefined;
+  /** Temporary conditions (STRIPPED, UNSTABLE, CRITICAL_LIMIT, RADIATION_LEAK, CIVIL_UNREST); they come and go. */
+  modifiers?: string[] | undefined;
 }
 
 export interface KnownSystem {
@@ -90,6 +92,7 @@ export type MapEntry = {
   x: number;
   y: number;
   traits: string[];
+  modifiers?: string[];
   exports?: string[];
   imports?: string[];
   exchange?: string[];
@@ -187,13 +190,27 @@ class Atlas {
         y: w.y,
         traits: traits.length ? traits : prev?.traits ?? [],
         underConstruction: typeof w.isUnderConstruction === "boolean" ? w.isUnderConstruction : prev?.underConstruction,
+        // Modifiers are only trusted from a full record (one with traits); scans from afar leave the known ones.
+        modifiers: traits.length && w.modifiers ? w.modifiers.map(m => m.symbol) : prev?.modifiers,
       };
+      if (!next.modifiers?.length) delete next.modifiers;
       if (JSON.stringify(prev) !== JSON.stringify(next)) {
         this.data.waypoints[w.symbol] = next;
         changed = true;
       }
     }
     if (changed) this.persist();
+  }
+
+  /** Modifiers reported by an extraction at the waypoint (the extract response carries them). */
+  recordModifiers(symbol: string, modifiers: WaypointModifier[]): void {
+    const w = this.data.waypoints[symbol];
+    if (!w) return;
+    const next = modifiers.map(m => m.symbol);
+    if (JSON.stringify(w.modifiers ?? []) === JSON.stringify(next)) return;
+    if (next.length) w.modifiers = next;
+    else delete w.modifiers;
+    this.persist();
   }
 
   recordSystem(s: System): void {
@@ -307,8 +324,9 @@ class Atlas {
         .map(w => ({ ...w, traits: w.traits.filter(t => USEFUL_TRAITS.has(t)) }))
         .filter(w => w.traits.length || /ASTEROID|GAS_GIANT/.test(w.type))
         .sort((a, b) => a.symbol.localeCompare(b.symbol))
-        .map(({ symbol, type, x, y, traits }) => {
+        .map(({ symbol, type, x, y, traits, modifiers }) => {
           const entry: MapEntry = { symbol, type, x, y, traits };
+          if (modifiers?.length) entry.modifiers = modifiers;
           const m = this.data.markets[symbol];
           if (m?.exports.length) entry.exports = m.exports;
           if (m?.imports.length) entry.imports = m.imports;

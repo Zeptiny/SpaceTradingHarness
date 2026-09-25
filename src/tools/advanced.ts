@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { api } from "../client/index.js";
 import { observeAgent, removeShip, upsertContract, upsertShip } from "../state/store.js";
-import { compactCargo } from "../state/projections.js";
+import { actionIncidents, compactCargo } from "../state/projections.js";
+import { atlas } from "../state/atlas.js";
 import { compactSurvey, surveys } from "../state/surveys.js";
 import { registerTool } from "./registry.js";
 import {
@@ -28,7 +29,7 @@ registerTool({
     const ship = await ctx.fresh.ship(shipSymbol);
     if (ship) upsertShip({ ...ship, nav: data.nav, fuel: data.fuel });
     return {
-      summary: `${shipSymbol} warping to ${waypointSymbol}, fuel ${data.fuel.current}/${data.fuel.capacity}`,
+      summary: `${shipSymbol} warping to ${waypointSymbol}, fuel ${data.fuel.current}/${data.fuel.capacity}${actionIncidents(data.events).note}`,
       result: data,
       followUpWakeAt: data.nav.route?.arrival ? Date.parse(data.nav.route.arrival) + 2000 : undefined,
       followUpReason: `${shipSymbol} warp arrival`,
@@ -117,8 +118,9 @@ registerTool({
       throw err;
     });
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
+    if (data.modifiers) atlas.recordModifiers(survey.symbol, data.modifiers);
     return {
-      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol} (surveyed), cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}`,
+      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol} (surveyed), cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}${actionIncidents(data.events, data.modifiers).note}`,
       result: data,
       followUpWakeAt: cooldownWakeAt(data.cooldown),
       followUpReason: `${shipSymbol} extraction cooldown done`,

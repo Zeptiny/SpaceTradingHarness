@@ -7,19 +7,20 @@ import { checkpointStore, type AgentPlan } from "../state/checkpoint.js";
 import { refreshAgent, refreshContracts, refreshFleet, scanShipLocations } from "../state/refresh.js";
 import { atlas, type GateSummary } from "../state/atlas.js";
 import { ledger, type Trend } from "../state/ledger.js";
-import { computeTradeLeads, prices, type TradeLead } from "../state/prices.js";
+import { computeTradeLeads, prices, routeCompetition, type TradeLead } from "../state/prices.js";
 import { runtime } from "../state/runtime.js";
 import { getTool, toolSpecs } from "../tools/registry.js";
 import { executeTool, type ExecOutcome } from "../tools/executor.js";
 import { scheduler, type Wakeup } from "./scheduler.js";
 import { chat, extractJson, isRetryableLlmError, type ChatMessage } from "./llm.js";
-import { compactShip, contractSummary, fleetTable, isContractOpen } from "../state/projections.js";
+import { compactShip, contractSummary, fleetTable, isContractOpen, shipWear, WEAR_ALERT_BELOW } from "../state/projections.js";
 import { compactSurvey, surveys } from "../state/surveys.js";
 import { shipyards } from "../state/shipyards.js";
 import { creditHistory } from "../state/credits.js";
 import { earnings, type ShipEarnings } from "../state/earnings.js";
 import { routines, describeSpec } from "../state/routines.js";
 import { mapSystem } from "../state/collector.js";
+import { serverInfo } from "../state/universe.js";
 import type { WakeStats } from "../state/summaries.js";
 import { annotateTimes, isoSec, stamp } from "../utils/time.js";
 import type { Agent, Ship } from "../generated/types.js";
@@ -51,7 +52,8 @@ Strategy:
 - Parallel income: (1) Trading — buy where a good is EXPORTed cheap, sell where it is IMPORTed dear; check tradeVolume per transaction and that margin × units clearly beats fuel. (2) Mining — mining drones / ore hounds extract at asteroid fields and sell (or hand off via transfer_cargo to a hauler). (3) Probes — cheap ships parked at markets and shipyards keep prices visible without spending fuel.
 - Invest continuously. When economy.investable covers a ship's price, buy one. Default order when unsure: 1–2 probes early to map markets and shipyards; then light haulers for trading once you know a profitable route, or mining drones if an asteroid field with nearby buyers exists. Keep buying while payback looks good. purchase_ship needs one of your ships at the shipyard (that is also how prices get revealed; prices you've seen are in economy.knownShipOffers). Assign every new ship a job in the same wake.
 - Keep the reserve (economy.reserve) for fuel, cargo capital and contract purchases; purchase_ship refuses buys that would dip below it.
-- Working memory does the bookkeeping for you: economy.trend is your measured income (earned = credit change + ship spend), economy.perShip is what each ship has earned (trade, fuel and contract money its own actions moved) against what it cost, market.tradeLeads are the best buy-here/sell-there spreads from prices your ships have seen (refreshed at every waypoint where a ship sits), map lists known markets (with what each exports/imports), shipyards and asteroids with coordinates, gates lists your system's jump gate and the systems it connects to. The harness fills these in between wakes. Use them before spending calls on discovery; send a ship or probe to market.unpricedMarkets to widen coverage.
+- Working memory does the bookkeeping for you: economy.trend is your measured income (earned = credit change + ship spend), economy.perShip is what each ship has earned (trade, fuel and contract money its own actions moved) against what it cost, market.tradeLeads are the best buy-here/sell-there spreads from prices your ships have seen (refreshed at every waypoint where a ship sits), with buySupply/sellSupply (a SCARCE source or ABUNDANT sink erodes the margin fast) and othersTradedLastHour (units other agents moved on the same route; a busy route saturates sooner), map lists known markets (with what each exports/imports), shipyards and asteroids with coordinates and any modifiers (STRIPPED, CRITICAL_LIMIT or UNSTABLE mark an over-mined asteroid: expect worse yields and consider moving miners), gates lists your system's jump gate and the systems it connects to. The harness fills these in between wakes. Use them before spending calls on discovery; send a ship or probe to market.unpricedMarkets to widen coverage.
+- Ships wear: a ship's wear field lists worn components (condition is repairable with repair_ship at a shipyard; integrity is permanent). server.nextReset is when the game wipes everything.
 - Track what works: remember() profitable routes (good, buy at, sell at, margin) and ship payback; set_goal for fleet-size and credit targets and complete them as you pass them.
 
 Game mechanics:
@@ -80,7 +82,7 @@ interface WorkingMemory {
     fleetSize: number;
     idleShips: string[];
     perShip: ShipEarnings[];
-    knownShipOffers: { type: string; price: number; waypoint: string; supply: string; seenMinutesAgo: number }[];
+    knownShipOffers: { type: string; price: number; waypoint: string; supply: string; cargo?: number | undefined; speed?: number | undefined; seenMinutesAgo: number }[];
     trend: { lastHour: Trend | null; lastDay: Trend | null };
   };
   market: {
@@ -100,11 +102,13 @@ interface WorkingMemory {
   notes: unknown[];
   recentSummaries: unknown[];
   limits: { maxActions: number; maxRounds: number };
+  /** When the game server next wipes the universe (everything is lost then). */
+  server: { nextReset: string | null; resetFrequency: string | null } | null;
   alerts: string[];
 }
 
 async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
-  const [agent, ships, contracts] = await Promise.all([refreshAgent(), refreshFleet(), refreshContracts()]);
+  const [agent, ships, contracts, server] = await Promise.all([refreshAgent(), refreshFleet(), refreshContracts(), serverInfo()]);
   const alerts: string[] = [];
   // A ship in a system the harness hasn't mapped yet: map it before the agent
   // reasons about it (a partial map once made a model decide it had no gate).
@@ -146,6 +150,8 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     price: o.price,
     waypoint: o.waypoint,
     supply: o.supply,
+    cargo: o.cargo,
+    speed: o.speed,
     seenMinutesAgo: Math.round((Date.now() - o.ts) / 60_000),
   }));
   const affordable = investable === null ? [] : offers.filter(o => o.price <= investable);
@@ -161,7 +167,12 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   }
 
   const latestPrices = prices.latest();
-  const tradeLeads = computeTradeLeads(latestPrices, { distance: (a, b) => atlas.distance(a, b) });
+  const fleetSymbols = new Set((ships ?? []).map(s => s.symbol));
+  const isOurs = (ship: string) => fleetSymbols.has(ship) || (!!agent && ship.startsWith(`${agent.symbol}-`));
+  const tradeLeads = computeTradeLeads(latestPrices, {
+    distance: (a, b) => atlas.distance(a, b),
+    competition: routeCompetition(isOurs),
+  });
   const fleetSystems = [...new Set((ships ?? []).map(s => s.nav.systemSymbol))];
   const priced = prices.marketsSeen();
   const unpricedMarkets = fleetSystems
@@ -188,6 +199,14 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     if (s.fuel && s.fuel.capacity > 0 && s.fuel.current / s.fuel.capacity < 0.2) {
       alerts.push(`${s.symbol} fuel low (${s.fuel.current}/${s.fuel.capacity})`);
     }
+    const worn = shipWear(s).filter(w => w.condition < WEAR_ALERT_BELOW);
+    if (worn.length) {
+      alerts.push(`${s.symbol} worn: ${worn.map(w => `${w.component} condition ${w.condition}`).join(", ")} — worn parts perform worse; repair_ship when docked at a shipyard restores condition`);
+    }
+  }
+  const resetAt = server?.nextReset ? Date.parse(server.nextReset) : NaN;
+  if (Number.isFinite(resetAt) && resetAt > Date.now() && resetAt - Date.now() < 24 * 3600_000) {
+    alerts.push(`server reset ${stamp(server!.nextReset!)}: the universe, fleet and credits are wiped then — weigh purchases by what they earn before it`);
   }
   const openContracts = (contracts ?? []).filter(isContractOpen);
   if (contracts && !openContracts.length) {
@@ -257,6 +276,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
       maxActions: Math.max(config.agent.maxActionsPerWake, config.agent.actionsPerShip * (ships?.length ?? 0)),
       maxRounds: Math.max(config.agent.maxRoundsPerWake, config.agent.roundsPerShip * (ships?.length ?? 0)),
     },
+    server: server ? { nextReset: server.nextReset, resetFrequency: server.resetFrequency } : null,
     alerts,
   };
   return annotateTimes(wm);

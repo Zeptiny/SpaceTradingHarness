@@ -9,7 +9,7 @@ import {
 import { ensureDocked, ensureOrbit } from "./navstate.js";
 import { config } from "../config.js";
 import { cooldownNote, cooldownWakeAt, etaWakeAt, stamp } from "../utils/time.js";
-import { compactCargo, compactShip, contractSummary } from "../state/projections.js";
+import { actionIncidents, compactCargo, compactShip, contractSummary } from "../state/projections.js";
 import { ledger } from "../state/ledger.js";
 import { ShipTypeValues, type ShipNavFlightMode } from "../generated/types.js";
 import { earnings } from "../state/earnings.js";
@@ -83,9 +83,10 @@ registerTool({
     const { data } = await api.navigate(shipSymbol, waypointSymbol);
     if (ship) upsertShip({ ...ship, nav: data.nav, fuel: data.fuel });
     expectArrival(shipSymbol, waypointSymbol, data.nav.route?.arrival);
+    const inc = actionIncidents(data.events);
     return {
-      summary: `${shipSymbol} in transit to ${waypointSymbol} (${data.nav.flightMode}), arrives ${stamp(data.nav.route?.arrival)}, fuel ${data.fuel.current}/${data.fuel.capacity}${refueled ? `; ${refueled} before leaving` : ""}`,
-      result: { nav: data.nav, fuel: data.fuel },
+      summary: `${shipSymbol} in transit to ${waypointSymbol} (${data.nav.flightMode}), arrives ${stamp(data.nav.route?.arrival)}, fuel ${data.fuel.current}/${data.fuel.capacity}${refueled ? `; ${refueled} before leaving` : ""}${inc.note}`,
+      result: { nav: data.nav, fuel: data.fuel, ...inc.incidents },
       followUpWakeAt: etaWakeAt(data.nav),
       followUpReason: `${shipSymbol} arrival at ${waypointSymbol}`,
     };
@@ -122,9 +123,11 @@ registerTool({
     await ensureOrbit(shipSymbol, ship);
     const { data } = await api.extract(shipSymbol);
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
+    if (ship && data.modifiers) atlas.recordModifiers(ship.nav.waypointSymbol, data.modifiers);
+    const inc = actionIncidents(data.events, data.modifiers);
     return {
-      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol}, cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}`,
-      result: { extraction: data.extraction, cooldown: data.cooldown, cargo: data.cargo },
+      summary: `${shipSymbol} extracted ${data.extraction.yield.units}x ${data.extraction.yield.symbol}, cargo ${data.cargo.units}/${data.cargo.capacity}${cooldownNote(data.cooldown)}${inc.note}`,
+      result: { extraction: data.extraction, cooldown: data.cooldown, cargo: data.cargo, ...inc.incidents },
       followUpWakeAt: cooldownWakeAt(data.cooldown),
       followUpReason: `${shipSymbol} extraction cooldown done`,
     };
@@ -143,9 +146,10 @@ registerTool({
     await ensureOrbit(shipSymbol, ship);
     const { data } = await api.siphon(shipSymbol);
     if (ship) upsertShip({ ...ship, cargo: data.cargo, cooldown: data.cooldown });
+    const inc = actionIncidents(data.events);
     return {
-      summary: `${shipSymbol} siphoned ${data.siphon.yield.units}x ${data.siphon.yield.symbol}${cooldownNote(data.cooldown)}`,
-      result: { siphon: data.siphon, cooldown: data.cooldown, cargo: data.cargo },
+      summary: `${shipSymbol} siphoned ${data.siphon.yield.units}x ${data.siphon.yield.symbol}${cooldownNote(data.cooldown)}${inc.note}`,
+      result: { siphon: data.siphon, cooldown: data.cooldown, cargo: data.cargo, ...inc.incidents },
       followUpWakeAt: cooldownWakeAt(data.cooldown),
       followUpReason: `${shipSymbol} siphon cooldown done`,
     };
