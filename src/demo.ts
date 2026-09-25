@@ -40,6 +40,7 @@ await import("./tools/read.js");
 await import("./tools/actions.js");
 await import("./tools/internal.js");
 await import("./tools/advanced.js");
+await import("./tools/routines.js");
 type TradeSymbol = import("./generated/types.js").TradeSymbol;
 type SupplyLevel = import("./generated/types.js").SupplyLevel;
 type ActivityLevel = import("./generated/types.js").ActivityLevel;

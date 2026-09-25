@@ -6,11 +6,13 @@ import { compactSurvey, surveys } from "../state/surveys.js";
 import { registerTool } from "./registry.js";
 import {
   cargoHasGood, cooldownClear, inOrbit, isDocked, knownShip,
-  notInTransit, shipHasModule, shipHasMount, transferTargetReady, waypointHasTrait,
+  noActiveContract, notInTransit, shipHasModule, shipHasMount, transferTargetReady, waypointHasTrait,
   type Guard, type GuardContext,
 } from "../guards/index.js";
 import { cooldownNote, cooldownWakeAt } from "../utils/time.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
+import { earnings } from "../state/earnings.js";
+import { expectArrival } from "../state/arrivals.js";
 
 // ---- Cross-system travel ----
 
@@ -46,6 +48,8 @@ registerTool({
     observeAgent(data.agent);
     const ship = await ctx.fresh.ship(shipSymbol);
     if (ship) upsertShip({ ...ship, nav: data.nav, cooldown: data.cooldown });
+    if (data.transaction) earnings.record(shipSymbol, -data.transaction.totalPrice, "fuel");
+    expectArrival(shipSymbol, waypointSymbol, Date.now());
     return {
       summary: `${shipSymbol} jumped to ${waypointSymbol}, cooldown ${data.cooldown.totalSeconds}s`,
       result: data,
@@ -177,7 +181,7 @@ registerTool({
   description: "Negotiate a new contract offer (ship must be at a faction waypoint, e.g. HQ; auto-docks if in orbit). Only works when you have no active contract.",
   kind: "action",
   input: z.object({ shipSymbol: z.string() }),
-  guards: [knownShip, notInTransit],
+  guards: [knownShip, notInTransit, noActiveContract],
   rateCost: 2,
   handler: async ({ shipSymbol }, ctx) => {
     await ensureDocked(shipSymbol, await ctx.fresh.ship(shipSymbol));

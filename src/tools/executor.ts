@@ -3,9 +3,11 @@ import { bus } from "../events/bus.js";
 import { activity } from "../state/activity.js";
 import { api } from "../client/index.js";
 import { mergeSystemWaypoints, mirror, observeAgent, storeKeys, upsertShip } from "../state/store.js";
+import { refreshContracts } from "../state/refresh.js";
 import { prices } from "../state/prices.js";
 import { shipyards } from "../state/shipyards.js";
 import { atlas } from "../state/atlas.js";
+import { routines, describeSpec } from "../state/routines.js";
 import { countRequests, SpaceTradersError } from "../transport/http.js";
 import { getTool, type ToolContext } from "./registry.js";
 import type { FreshReader, GuardResult } from "../guards/index.js";
@@ -129,10 +131,20 @@ function makeFreshReader(): FreshReader {
       observeAgent(data);
       return data;
     },
+    contracts: () => refreshContracts(),
   };
 }
 
-export async function executeTool(name: string, rawArgs: unknown): Promise<ExecOutcome> {
+export interface ExecOptions {
+  /** "routine" when a ship routine runs the call; agent calls on a ship that runs a routine are refused. */
+  source?: "agent" | "routine";
+}
+
+// Tools the agent may call on a ship while it runs a routine.
+const ROUTINE_CONTROL = new Set(["assign_routine", "cancel_routine"]);
+
+export async function executeTool(name: string, rawArgs: unknown, opts: ExecOptions = {}): Promise<ExecOutcome> {
+  const source = opts.source ?? "agent";
   const tool = getTool(name);
   if (!tool) {
     return recordActivityOutcome({ tool: name, outcome: "unknown-tool", summary: `unknown tool ${name}` }, name, rawArgs, [], 0, 0);
@@ -158,6 +170,17 @@ export async function executeTool(name: string, rawArgs: unknown): Promise<ExecO
   const guardResults: { guard: string; ok: boolean; reason?: string | undefined }[] = [];
   const fresh = makeFreshReader();
   const shipSymbol = typeof args["shipSymbol"] === "string" ? (args["shipSymbol"] as string) : null;
+  const busy = source === "agent" && tool.kind === "action" && shipSymbol && !ROUTINE_CONTROL.has(name) ? routines.active(shipSymbol) : undefined;
+  if (busy) {
+    return recordActivityOutcome(
+      {
+        tool: name,
+        outcome: "guard-rejected",
+        summary: `guard routineFree: ${shipSymbol} is running a routine (${describeSpec(busy.spec)}, ${busy.phase}); cancel_routine first, or assign_routine to give it a different one`,
+      },
+      name, args, [], 0, 0,
+    );
+  }
   const requests = { n: 0 };
   const lock: { release?: () => void } = {};
   const started = Date.now();
@@ -174,7 +197,7 @@ export async function executeTool(name: string, rawArgs: unknown): Promise<ExecO
           bus.emit({ type: "GuardFailed", ts: Date.now(), tool: name, guard: guard.name, reason: g.reason ?? "" });
           return recordActivityOutcome(
             { tool: name, outcome: "guard-rejected", summary: `guard ${guard.name}: ${g.reason}` },
-            name, args, guardResults, requests.n, Date.now() - started,
+            name, args, guardResults, requests.n, Date.now() - started, source,
           );
         }
       }
@@ -188,13 +211,13 @@ export async function executeTool(name: string, rawArgs: unknown): Promise<ExecO
           followUpWakeAt: res.followUpWakeAt,
           followUpReason: res.followUpReason,
         },
-        name, args, guardResults, requests.n, Date.now() - started,
+        name, args, guardResults, requests.n, Date.now() - started, source,
       );
     });
   } catch (err) {
     return recordActivityOutcome(
       { tool: name, outcome: "api-error", summary: errorSummary(err) },
-      name, args, guardResults, requests.n, Date.now() - started,
+      name, args, guardResults, requests.n, Date.now() - started, source,
     );
   } finally {
     lock.release?.();
@@ -219,13 +242,16 @@ function recordActivityOutcome(
   guards: { guard: string; ok: boolean; reason?: string | undefined }[],
   requests: number,
   durationMs: number,
+  source: "agent" | "routine" = "agent",
 ): ExecOutcome {
+  // Routine steps are marked in the log so the operator can tell them from the agent's own calls.
+  const logged = source === "routine" ? `[routine] ${outcome.summary}` : outcome.summary;
   activity.append({
     kind: "tool",
     tool,
     args,
     outcome: outcome.outcome,
-    summary: outcome.summary,
+    summary: logged,
     result: outcome.outcome === "ok" ? outcome.result : undefined,
     guards,
     requestsSpent: requests,
@@ -237,7 +263,7 @@ function recordActivityOutcome(
     tool,
     args,
     outcome: outcome.outcome,
-    summary: outcome.summary,
+    summary: logged,
     requestsSpent: requests,
     durationMs,
   });

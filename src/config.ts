@@ -12,6 +12,12 @@ function num(name: string, def: number): number {
   return Number.isFinite(n) ? n : def;
 }
 
+function flag(name: string, def: boolean): boolean {
+  const v = process.env[name]?.trim().toLowerCase();
+  if (!v) return def;
+  return !(v === "0" || v === "false" || v === "off" || v === "no");
+}
+
 export type AgentPolicy = "full" | "readonly";
 
 export const config = {
@@ -47,6 +53,21 @@ export const config = {
     collectorIntervalMs: num("AGENT_COLLECTOR_INTERVAL_MS", 120_000),
     collectorRequests: num("AGENT_COLLECTOR_REQUESTS", 6),
     maxRoundsPerWake: num("AGENT_MAX_ROUNDS_PER_WAKE", 32),
+    // Round cap scales with fleet size like the action budget: max(maxRoundsPerWake, this × fleet).
+    roundsPerShip: num("AGENT_ROUNDS_PER_SHIP", 4),
+    // Extra LLM attempts after a timeout or server error before the wake gives up (the conversation is kept).
+    llmRetries: num("AGENT_LLM_RETRIES", 3),
+    // Top up fuel whenever a ship leaves a market that sells FUEL.
+    autoRefuel: flag("AGENT_AUTO_REFUEL", true),
+    // Skip the top-up where fuel costs more than this fraction above the cheapest fuel seen in the system
+    // (unless the ship needs it to reach its destination).
+    autoRefuelMaxPremium: num("AGENT_AUTO_REFUEL_MAX_PREMIUM", 0.15),
+    // Read the market (and a stale shipyard) at every waypoint a ship arrives at.
+    readMarketOnArrival: flag("AGENT_READ_MARKET_ON_ARRIVAL", true),
+    // Fulfil a contract when its last delivery lands, then negotiate the next offer with the same ship.
+    autoContracts: flag("AGENT_AUTO_CONTRACTS", true),
+    // Ship routines never spend the balance below this on cargo.
+    routineMinCredits: num("AGENT_ROUTINE_MIN_CREDITS", 5_000),
     maxConcurrentTools: num("AGENT_MAX_CONCURRENT_TOOLS", 3),
     fallbackWakeMs: num("AGENT_FALLBACK_WAKE_MS", 10 * 60_000),
     minWakeGapMs: num("AGENT_MIN_WAKE_GAP_MS", 60_000),

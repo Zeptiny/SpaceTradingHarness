@@ -193,6 +193,22 @@ async function runTask(t: Task, spend: (need?: number) => boolean): Promise<void
   }
 }
 
+/**
+ * Maps a system completely right now (system record + every waypoint page),
+ * so the first wake in a new system never reasons from a partial map.
+ */
+export async function mapSystem(system: string): Promise<void> {
+  if (atlas.system(system)?.mapped) return;
+  let budget = 12;
+  const spend = (need = 1): boolean => {
+    if (budget < need) return false;
+    budget -= need;
+    return true;
+  };
+  if (!atlas.system(system)) await runTask({ kind: "system", system }, spend);
+  await runTask({ kind: "map", system }, spend);
+}
+
 const spot = (s: Ship): ShipSpot => ({ system: s.nav.systemSymbol, waypoint: s.nav.waypointSymbol, inTransit: s.nav.status === "IN_TRANSIT" });
 
 /** One collection pass. Returns the number of requests spent (the fleet read included). */

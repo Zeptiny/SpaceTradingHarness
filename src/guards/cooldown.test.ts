@@ -29,7 +29,7 @@ test("rejects with seconds left, expiry and the shared-cooldown hint", async () 
   assert.equal(r.ok, false);
   assert.match(r.reason ?? "", /until \d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ \(in 4[12]s\)/);
   assert.match(r.reason ?? "", /survey\/extract/);
-  assert.match(r.reason ?? "", /wait_for_ship/);
+  assert.match(r.reason ?? "", /wait_for_next/);
 });
 
 test("transit rejection names the arrival and seconds left", async () => {

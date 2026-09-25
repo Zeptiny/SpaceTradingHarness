@@ -80,7 +80,7 @@ export function annotateTimes<T>(v: T, nowMs = Date.now()): T {
 }
 
 /** Appended to transit/cooldown rejections so the agent stops retrying early. */
-export const WAIT_HINT = "retrying before then is always rejected; the harness auto-wakes the ship then. Use wait_for_ship if it is under 2 min, otherwise work other ships or end_loop";
+export const WAIT_HINT = "retrying before then is always rejected; the harness auto-wakes the ship then. Use wait_for_next if it is under 2 min, otherwise work other ships or end_loop";
 
 /** ", cooldown 70s" for tool summaries, so the agent sees the lockout before it tries the next action. */
 export function cooldownNote(cd: Cooldown | undefined | null): string {

@@ -73,6 +73,8 @@ Practical notes for building an agent harness on top of the SpaceTraders API. Fu
 5. **Symbols are stable identifiers.** Ship symbols are `{AGENT}-{HEX}`, waypoints `{SYSTEM}-{X}-{Y}` (e.g. `X1-OE-01A`), contracts UUIDs. Use them as tool parameter keys.
 6. **Static vs dynamic data.** Systems, waypoints, factions are static per reset; markets, shipyards, construction change constantly. The harness makes no freshness/distinction tradeoffs for the agent — every read is live from the API, paced by the rate limiter.
 7. **Registration is one-time per reset.** `/register` requires an AccountToken (from the website dashboard), not an agent token.
+8. **Routines do the repetition.** `assign_routine` (trade / mine / scout) and `goto` hand a ship to a per-ship loop (`src/routines/engine.ts`) that asks pure step functions (`src/routines/decide.ts`) for the next step and runs it through the normal tools, so guards, locks and the activity log still apply. Routine steps cost no LLM rounds or action budget; the agent is woken only when a routine stops (with the reason) or a goto arrives, and its own actions on a routine ship are refused until `cancel_routine`. Routes are planned by `src/utils/route.ts` (fuel stops within a system, gate chains across systems).
+9. **Automatic housekeeping.** Before departures the harness tops up fuel at fair prices, prices the market when a ship lands, fulfils a contract when its last delivery lands and negotiates the next one, and `sell_all` clears a hold in trade-volume chunks. Each is a config flag (see README).
 
 ## Example Tool → Route Mapping
 

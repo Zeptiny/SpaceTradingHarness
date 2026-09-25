@@ -12,12 +12,13 @@ export interface PricePoint {
   ts: number;
 }
 
+/** youPay: what buyAt charges per unit; youGet: what sellAt pays per unit. */
 export interface TradeLead {
   good: string;
   buyAt: string;
-  buyPrice: number;
+  youPay: number;
   sellAt: string;
-  sellPrice: number;
+  youGet: number;
   marginPerUnit: number;
   unitsPerTrade: number; // min tradeVolume of both ends — what one buy/sell call moves without moving the price much
   profitPerTrade: number;
@@ -87,10 +88,24 @@ class PriceHistory {
     return out;
   }
 
+  /**
+   * Compact lines for a market priced within maxAgeMs, one per good:
+   * "FOOD IMPORT pay 5034 get 2495 vol 60" (pay = what you pay to buy here,
+   * get = what you get selling here). Null when not priced that recently.
+   */
+  snapshot(waypoint: string, maxAgeMs: number, now = Date.now()): string[] | null {
+    const points = this.latest().filter(p => p.waypoint === waypoint && now - p.ts <= maxAgeMs);
+    if (!points.length) return null;
+    return points
+      .sort((a, b) => a.good.localeCompare(b.good))
+      .map(p => `${p.good} ${p.type ?? "?"} pay ${p.purchasePrice ?? "-"} get ${p.sellPrice ?? "-"} vol ${p.volume ?? "-"}`);
+  }
+
   bestPrices(good: string): { buyFrom: PricePoint | undefined; sellTo: PricePoint | undefined } {
     const points = this.query({ good, limit: PER_KEY });
-    const sells = points.filter(p => p.purchasePrice != null);
-    const buys = points.filter(p => p.sellPrice != null);
+    // You can only buy where the good is exported/exchanged and sell where it is imported/exchanged.
+    const sells = points.filter(p => p.purchasePrice != null && p.type !== "IMPORT");
+    const buys = points.filter(p => p.sellPrice != null && p.type !== "EXPORT");
     return {
       buyFrom: sells.sort((a, b) => (a.purchasePrice ?? 0) - (b.purchasePrice ?? 0))[0],
       sellTo: buys.sort((a, b) => (b.sellPrice ?? 0) - (a.sellPrice ?? 0))[0],
@@ -123,9 +138,9 @@ export function computeTradeLeads(
         leads.push({
           good,
           buyAt: src.waypoint,
-          buyPrice: src.purchasePrice,
+          youPay: src.purchasePrice,
           sellAt: dst.waypoint,
-          sellPrice: dst.sellPrice,
+          youGet: dst.sellPrice,
           marginPerUnit: margin,
           unitsPerTrade: units,
           profitPerTrade: margin * units,

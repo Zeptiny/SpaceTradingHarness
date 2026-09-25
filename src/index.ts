@@ -7,6 +7,8 @@ import "./tools/read.js";
 import "./tools/actions.js";
 import "./tools/internal.js";
 import "./tools/advanced.js";
+import "./tools/routines.js";
+import { startRoutines } from "./routines/engine.js";
 import { bus } from "./events/bus.js";
 
 process.on("unhandledRejection", reason => {
@@ -30,3 +32,4 @@ startPanel();
 startAgent();
 void startSocketIngest();
 startCollector();
+startRoutines();
