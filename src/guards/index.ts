@@ -2,6 +2,7 @@ import type { Agent, Contract, Market, Ship, ShipNavFlightMode, ShipNavStatus, S
 import { systemOf } from "../utils/symbols.js";
 import { distance, fuelCost } from "../utils/nav.js";
 import { secondsUntil, WAIT_HINT } from "../utils/time.js";
+import { config } from "../config.js";
 
 /**
  * Fresh state reader. Implementations fetch live from the API (memoized per
@@ -233,6 +234,12 @@ export const hasFuelForRoute: Guard = async (_name, ctx) => {
   const mode = (typeof modeArg === "string" ? modeArg : ship.nav.flightMode) as ShipNavFlightMode;
   const need = fuelCost(distance(from, to), mode);
   if (ship.fuel.capacity > 0 && ship.fuel.current < need) {
+    // navigate tops up before leaving a market that sells fuel (AGENT_AUTO_REFUEL).
+    if (config.agent.autoRefuel && ctx.args["refuel"] !== false && ship.fuel.capacity >= need) {
+      const market = await ctx.fresh.market(systemOf(ship.nav.waypointSymbol), ship.nav.waypointSymbol).catch(() => undefined);
+      const fuel = market?.tradeGoods?.find(g => g.symbol === "FUEL");
+      if (fuel && fuel.type !== "IMPORT") return { ok: true, reason: `will refuel here first (fuel ${ship.fuel.current} < ${need})` };
+    }
     const hint = mode === "DRIFT" ? "" : " — refuel first, or use flightMode DRIFT (1 fuel, slow)";
     return { ok: false, reason: `fuel ${ship.fuel.current}/${ship.fuel.capacity} < ${need} needed (${mode})${hint}` };
   }

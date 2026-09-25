@@ -10,6 +10,8 @@ import {
 import { cooldownNote, cooldownWakeAt } from "../utils/time.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
 import type { Survey } from "../generated/types.js";
+import { earnings } from "../state/earnings.js";
+import { expectArrival } from "../state/arrivals.js";
 
 // ---- Cross-system travel ----
 
@@ -45,6 +47,8 @@ registerTool({
     observeAgent(data.agent);
     const ship = await ctx.fresh.ship(shipSymbol);
     if (ship) upsertShip({ ...ship, nav: data.nav, cooldown: data.cooldown });
+    if (data.transaction) earnings.record(shipSymbol, -data.transaction.totalPrice, "fuel");
+    expectArrival(shipSymbol, waypointSymbol, Date.now());
     return {
       summary: `${shipSymbol} jumped to ${waypointSymbol}, cooldown ${data.cooldown.totalSeconds}s`,
       result: data,
