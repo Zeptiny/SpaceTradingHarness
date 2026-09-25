@@ -141,11 +141,11 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
   if (unmapped.length) {
     alerts.push(`map of ${unmapped.join(", ")} incomplete — the harness maps it between wakes; call get_system_waypoints only if you need it this wake`);
   }
-  const bestBuy = (good: string): { price: number; at: string } | null => {
+  const bestBuy = (good: string): { youPay: number; at: string } | null => {
     const src = latestPrices
       .filter(p => p.good === good && p.purchasePrice != null && p.type !== "IMPORT")
       .sort((a, b) => a.purchasePrice! - b.purchasePrice!)[0];
-    return src ? { price: src.purchasePrice!, at: src.waypoint } : null;
+    return src ? { youPay: src.purchasePrice!, at: src.waypoint } : null;
   };
 
   for (const s of ships ?? []) {

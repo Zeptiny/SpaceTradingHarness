@@ -39,6 +39,9 @@ export function compactShip(s: Ship) {
   };
 }
 
+// Prices are named from the agent's side: youPay is what the market charges
+// you to buy one unit (API purchasePrice), youGet is what it pays you per unit
+// you sell (API sellPrice). The API names read backwards to models.
 export function compactMarket(m: Market) {
   if (m.tradeGoods?.length) {
     return {
@@ -48,8 +51,8 @@ export function compactMarket(m: Market) {
         type: g.type,
         supply: g.supply,
         activity: g.activity,
-        purchasePrice: g.purchasePrice,
-        sellPrice: g.sellPrice,
+        youPay: g.purchasePrice,
+        youGet: g.sellPrice,
         tradeVolume: g.tradeVolume,
       })),
     };
@@ -70,7 +73,7 @@ export function compactShipyard(y: Shipyard) {
       modificationsFee: y.modificationsFee,
       ships: y.ships.map(s => ({
         type: s.type,
-        purchasePrice: s.purchasePrice,
+        price: s.purchasePrice,
         supply: s.supply,
         frame: s.frame.symbol,
         speed: s.engine.speed,

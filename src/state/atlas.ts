@@ -67,6 +67,11 @@ const USEFUL_TRAITS = new Set([
   "MINERAL_DEPOSITS", "EXPLOSIVE_GASES", "ICE_CRYSTALS", "STRIPPED", "UNSTABLE_COMPOSITION",
 ]);
 
+/** Drops flavor traits (see USEFUL_TRAITS) so waypoint lists stay compact. */
+export function usefulTraits(traits: string[]): string[] {
+  return traits.filter(t => USEFUL_TRAITS.has(t));
+}
+
 const emptyData = (): AtlasData => ({ waypoints: {}, systems: {}, gates: {}, construction: {}, markets: {} });
 
 /** Accepts the current file shape and the older flat waypoint directory. */
@@ -269,6 +274,17 @@ class Atlas {
 
   market(symbol: string): KnownMarket | undefined {
     return this.data.markets[symbol];
+  }
+
+  /** True when the waypoint's market is known to sell FUEL (export or exchange). */
+  sellsFuel(symbol: string): boolean {
+    const m = this.data.markets[symbol];
+    return !!m && (m.exchange.includes("FUEL") || m.exports.includes("FUEL"));
+  }
+
+  /** Every known gate record (all systems). */
+  allGates(): KnownGate[] {
+    return Object.values(this.data.gates);
   }
 
   inSystem(system: string): KnownWaypoint[] {

@@ -3,7 +3,7 @@ import { api } from "../client/index.js";
 import { observeAgent, upsertContract, upsertShip } from "../state/store.js";
 import { registerTool } from "./registry.js";
 import {
-  canBuyShip, cargoHasGood, cargoHasRoom, cooldownClear, hasFuelForRoute, inOrbit, isDocked,
+  canAffordCargo, canBuyShip, cargoHasGood, cargoHasRoom, cooldownClear, hasFuelForRoute, inOrbit, isDocked,
   knownShip, marketSellsFuel, marketTrades, notInTransit, shipHasMount,
 } from "../guards/index.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
@@ -135,7 +135,7 @@ registerTool({
   description: "Buy units of a trade good into ship cargo at a market that EXPORTs/EXCHANGEs it (auto-docks if in orbit). Units per call are capped by the good's tradeVolume.",
   kind: "action",
   input: z.object({ shipSymbol: z.string(), symbol: z.string(), units: z.number().int().positive() }),
-  guards: [knownShip, notInTransit, marketTrades("buy"), cargoHasRoom()],
+  guards: [knownShip, notInTransit, marketTrades("buy"), cargoHasRoom(), canAffordCargo],
   rateCost: 4,
   handler: async ({ shipSymbol, symbol, units }, ctx) => {
     const ship = await ctx.fresh.ship(shipSymbol);
@@ -172,14 +172,15 @@ registerTool({
 
 registerTool({
   name: "jettison",
-  description: "Throw cargo overboard (ship must be in orbit). Irreversible.",
+  description: "Throw cargo overboard (auto-orbits if docked). Irreversible. To dump several goods at once use sell_all with jettison.",
   kind: "action",
   input: z.object({ shipSymbol: z.string(), symbol: z.string(), units: z.number().int().positive() }),
-  guards: [knownShip, inOrbit, cargoHasGood],
+  guards: [knownShip, notInTransit, cargoHasGood],
   rateCost: 2,
   handler: async ({ shipSymbol, symbol, units }, ctx) => {
-    const { data } = await api.jettison(shipSymbol, symbol, units);
     const ship = await ctx.fresh.ship(shipSymbol);
+    await ensureOrbit(shipSymbol, ship);
+    const { data } = await api.jettison(shipSymbol, symbol, units);
     if (ship) upsertShip({ ...ship, cargo: data.cargo });
     return { summary: `${shipSymbol} jettisoned ${units}x ${symbol}`, result: { cargo: compactCargo(data.cargo) } };
   },

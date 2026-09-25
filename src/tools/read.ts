@@ -5,7 +5,7 @@ import { refreshAgent, refreshContracts, refreshFleet, fetchMarket, paginate } f
 import { registerTool } from "./registry.js";
 import { systemOf } from "../utils/symbols.js";
 import { shipyards } from "../state/shipyards.js";
-import { atlas } from "../state/atlas.js";
+import { atlas, usefulTraits } from "../state/atlas.js";
 import type { System, Waypoint, Faction } from "../generated/types.js";
 import { WaypointTraitSymbolValues } from "../generated/types.js";
 import {
@@ -111,23 +111,34 @@ registerTool({
   },
 });
 
+// A large system has 60+ waypoints; one call reads them all so the agent
+// never mistakes page 1 for the whole system.
+const MAX_WAYPOINT_PAGES = 10;
+
 registerTool({
   name: "get_system_waypoints",
-  description: "Waypoints in a system; optional trait filter (must be a valid WaypointTraitSymbol, e.g. MARKETPLACE, COMMON_METAL_DEPOSITS).",
+  description: "Every waypoint in a system (all pages in one call), optionally only those with a trait (must be a valid WaypointTraitSymbol, e.g. MARKETPLACE, SHIPYARD, COMMON_METAL_DEPOSITS). Traits are trimmed to the useful ones. The summary gives the API's total count.",
   kind: "read",
   input: z.object({
     systemSymbol: z.string(),
     traitFilter: z.enum(WaypointTraitSymbolValues).optional(),
-    page: z.number().int().min(1).default(1),
   }),
-  rateCost: 1,
-  handler: async ({ systemSymbol, traitFilter, page }) => {
-    const waypoints = await api.listSystemWaypoints(systemSymbol, 20, page, traitFilter).then(r => r.data);
-    const merged = mergeSystemWaypoints(systemSymbol, waypoints);
+  rateCost: 3,
+  handler: async ({ systemSymbol, traitFilter }) => {
+    const waypoints: Waypoint[] = [];
+    let total: number | undefined;
+    for (let page = 1; page <= MAX_WAYPOINT_PAGES; page++) {
+      const r = await api.listSystemWaypoints(systemSymbol, 20, page, traitFilter);
+      waypoints.push(...r.data);
+      total = (r.meta as { total?: number } | undefined)?.total ?? total;
+      if (r.data.length < 20 || (total !== undefined && waypoints.length >= total)) break;
+    }
+    mergeSystemWaypoints(systemSymbol, waypoints);
     atlas.record(waypoints);
+    const missing = total !== undefined && waypoints.length < total ? ` (${total - waypoints.length} more not read)` : "";
     return {
-      summary: `page ${page}: ${waypoints.length}${traitFilter ? ` (${traitFilter})` : ""}; system total: ${merged.length} waypoints`,
-      result: waypoints.map(w => ({ symbol: w.symbol, type: w.type, x: w.x, y: w.y, traits: w.traits.map(t => t.symbol) })),
+      summary: `${systemSymbol}: ${waypoints.length} of ${total ?? waypoints.length} waypoints${traitFilter ? ` with ${traitFilter}` : ""}${missing}`,
+      result: waypoints.map(w => ({ symbol: w.symbol, type: w.type, x: w.x, y: w.y, traits: usefulTraits(w.traits.map(t => t.symbol)) })),
     };
   },
 });

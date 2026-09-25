@@ -5,7 +5,7 @@ import { compactCargo } from "../state/projections.js";
 import { registerTool } from "./registry.js";
 import {
   cargoHasGood, cooldownClear, inOrbit, isDocked, knownShip,
-  notInTransit, shipHasModule, shipHasMount, transferTargetReady, waypointHasTrait,
+  noActiveContract, notInTransit, shipHasModule, shipHasMount, transferTargetReady, waypointHasTrait,
 } from "../guards/index.js";
 import { cooldownNote, cooldownWakeAt } from "../utils/time.js";
 import { ensureDocked, ensureOrbit } from "./navstate.js";
@@ -164,7 +164,7 @@ registerTool({
   description: "Negotiate a new contract offer (ship must be at a faction waypoint, e.g. HQ; auto-docks if in orbit). Only works when you have no active contract.",
   kind: "action",
   input: z.object({ shipSymbol: z.string() }),
-  guards: [knownShip, notInTransit],
+  guards: [knownShip, notInTransit, noActiveContract],
   rateCost: 2,
   handler: async ({ shipSymbol }, ctx) => {
     await ensureDocked(shipSymbol, await ctx.fresh.ship(shipSymbol));

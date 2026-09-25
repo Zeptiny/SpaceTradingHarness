@@ -3,6 +3,7 @@ import { bus } from "../events/bus.js";
 import { activity } from "../state/activity.js";
 import { api } from "../client/index.js";
 import { mergeSystemWaypoints, mirror, observeAgent, storeKeys, upsertShip } from "../state/store.js";
+import { refreshContracts } from "../state/refresh.js";
 import { prices } from "../state/prices.js";
 import { shipyards } from "../state/shipyards.js";
 import { atlas } from "../state/atlas.js";
@@ -129,6 +130,7 @@ function makeFreshReader(): FreshReader {
       observeAgent(data);
       return data;
     },
+    contracts: () => refreshContracts(),
   };
 }
 

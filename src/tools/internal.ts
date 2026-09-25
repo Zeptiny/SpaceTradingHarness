@@ -132,16 +132,33 @@ registerTool({
 
 registerTool({
   name: "get_market_memory",
-  description: "Harness-local price history (the API has no history). Query by good symbol and/or waypoint; returns recent points and best buy/sell seen.",
+  description: "Harness-local price history (the API has no history). Query by good symbol and/or waypoint; returns recent points (youPay = what that market charges you per unit, youGet = what it pays you per unit) and, for a good, the cheapest place to buy and best place to sell seen.",
   kind: "internal",
   input: z.object({ good: z.string().optional(), waypoint: z.string().optional(), limit: z.number().int().min(1).max(60).default(15) }),
   rateCost: 0,
   handler: async ({ good, waypoint, limit }) => {
-    const points = prices.query({ good, waypoint, limit });
-    const best = good ? prices.bestPrices(good) : {};
+    const points = prices.query({ good, waypoint, limit }).map(p => ({
+      waypoint: p.waypoint,
+      good: p.good,
+      type: p.type,
+      youPay: p.purchasePrice,
+      youGet: p.sellPrice,
+      volume: p.volume,
+      supply: p.supply,
+      ts: p.ts,
+    }));
+    const best = good ? prices.bestPrices(good) : null;
     return {
       summary: `${points.length} price points${good ? ` for ${good}` : ""}`,
-      result: { points, best },
+      result: {
+        points,
+        ...(best
+          ? {
+              cheapestToBuy: best.buyFrom ? { waypoint: best.buyFrom.waypoint, youPay: best.buyFrom.purchasePrice, ts: best.buyFrom.ts } : null,
+              bestToSellTo: best.sellTo ? { waypoint: best.sellTo.waypoint, youGet: best.sellTo.sellPrice, ts: best.sellTo.ts } : null,
+            }
+          : {}),
+      },
     };
   },
 });

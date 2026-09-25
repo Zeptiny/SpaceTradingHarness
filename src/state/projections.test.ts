@@ -45,7 +45,7 @@ test("compact market keeps every price well inside the tool-result cap", () => {
   assert.ok("tradeGoods" in compact);
   assert.equal(compact.tradeGoods.length, 11);
   assert.deepEqual(compact.tradeGoods[0], {
-    symbol: "IRON", type: "EXPORT", supply: "MODERATE", activity: "WEAK", purchasePrice: 100, sellPrice: 90, tradeVolume: 60,
+    symbol: "IRON", type: "EXPORT", supply: "MODERATE", activity: "WEAK", youPay: 100, youGet: 90, tradeVolume: 60,
   });
 });
 

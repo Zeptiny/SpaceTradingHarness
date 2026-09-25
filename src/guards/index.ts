@@ -1,4 +1,4 @@
-import type { Agent, Market, Ship, ShipNavFlightMode, ShipNavStatus, Shipyard, Waypoint } from "../generated/types.js";
+import type { Agent, Contract, Market, Ship, ShipNavFlightMode, ShipNavStatus, Shipyard, Waypoint } from "../generated/types.js";
 import { systemOf } from "../utils/symbols.js";
 import { distance, fuelCost } from "../utils/nav.js";
 import { secondsUntil, WAIT_HINT } from "../utils/time.js";
@@ -15,6 +15,8 @@ export interface FreshReader {
   waypoint(systemSymbol: string, waypointSymbol: string): Promise<Waypoint | undefined>;
   shipyard(systemSymbol: string, waypointSymbol: string): Promise<Shipyard | undefined>;
   agent(): Promise<Agent | undefined>;
+  /** All contracts (optional so older test doubles still type-check). */
+  contracts?(): Promise<Contract[] | undefined>;
 }
 
 export interface GuardContext {
@@ -233,6 +235,44 @@ export const hasFuelForRoute: Guard = async (_name, ctx) => {
   if (ship.fuel.capacity > 0 && ship.fuel.current < need) {
     const hint = mode === "DRIFT" ? "" : " — refuel first, or use flightMode DRIFT (1 fuel, slow)";
     return { ok: false, reason: `fuel ${ship.fuel.current}/${ship.fuel.capacity} < ${need} needed (${mode})${hint}` };
+  }
+  return { ok: true };
+};
+
+// buy_cargo: the market's live price × units must fit the balance, so the
+// agent gets a clear local rejection instead of API error 4600.
+export const canAffordCargo: Guard = async (_name, ctx) => {
+  const r = await requireShip(ctx);
+  if ("error" in r) return r.error;
+  const symbol = ctx.args["symbol"];
+  const units = Number(ctx.args["units"] ?? 0);
+  const wSym = r.ship.nav.waypointSymbol;
+  const market = await ctx.fresh.market(systemOf(wSym), wSym);
+  const price = market?.tradeGoods?.find(t => t.symbol === symbol)?.purchasePrice;
+  if (price === undefined) return { ok: true };
+  let agent: Agent | undefined;
+  try {
+    agent = await ctx.fresh.agent();
+  } catch {
+    agent = undefined;
+  }
+  if (!agent) return { ok: true, reason: "credit balance unknown (allowed)" };
+  const cost = price * units;
+  if (cost > agent.credits) {
+    return { ok: false, reason: `${units}x ${symbol} costs ~${cost} (${price}/unit), credits ${agent.credits}; you can afford ${Math.floor(agent.credits / price)}` };
+  }
+  return { ok: true };
+};
+
+// The game allows one active contract; negotiating another fails with 4511.
+export const noActiveContract: Guard = async (_name, ctx) => {
+  const contracts = await ctx.fresh.contracts?.();
+  if (!contracts) return { ok: true };
+  const now = Date.now();
+  const active = contracts.find(c => c.accepted && !c.fulfilled && Date.parse(c.terms.deadline) > now);
+  if (active) {
+    const left = (active.terms.deliver ?? []).map(d => `${d.tradeSymbol} ${d.unitsFulfilled}/${d.unitsRequired}`).join(", ");
+    return { ok: false, reason: `contract ${active.id.slice(0, 8)} is still active (${left}); the game allows one at a time — deliver and fulfill it first` };
   }
   return { ok: true };
 };
