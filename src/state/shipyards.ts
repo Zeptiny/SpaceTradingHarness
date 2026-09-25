@@ -40,6 +40,15 @@ class ShipyardMemory {
     saveJsonAtomic(this.file, this.offers);
   }
 
+  /** When prices at this shipyard were last seen, if ever. */
+  seenAt(waypoint: string): number | undefined {
+    let ts: number | undefined;
+    for (const o of Object.values(this.offers)) {
+      if (o.waypoint === waypoint && (ts === undefined || o.ts > ts)) ts = o.ts;
+    }
+    return ts;
+  }
+
   /** Cheapest known offer per ship type, cheapest first. */
   cheapestByType(): ShipOffer[] {
     const best = new Map<string, ShipOffer>();

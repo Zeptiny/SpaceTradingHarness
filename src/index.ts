@@ -2,6 +2,7 @@ import { config } from "./config.js";
 import { startPanel } from "./panel/server.js";
 import { startAgent } from "./agent/loop.js";
 import { startSocketIngest } from "./events/socket.js";
+import { startCollector } from "./state/collector.js";
 import "./tools/read.js";
 import "./tools/actions.js";
 import "./tools/internal.js";
@@ -28,3 +29,4 @@ console.log(`[harness] base=${config.baseUrl} model=${config.llm.model} policy=$
 startPanel();
 startAgent();
 void startSocketIngest();
+startCollector();
