@@ -54,6 +54,8 @@ export const config = {
   transport: {
     minIntervalMs: num("TRANSPORT_MIN_INTERVAL_MS", 600),
     maxRetries: num("TRANSPORT_MAX_RETRIES", 2),
+    // 429s are waited out and resent this many times before the call fails.
+    maxRateLimitRetries: num("TRANSPORT_MAX_429_RETRIES", 20),
     timeoutMs: num("TRANSPORT_TIMEOUT_MS", 20_000),
     maxRetryAfterMs: num("TRANSPORT_MAX_RETRY_AFTER_MS", 15_000),
   },

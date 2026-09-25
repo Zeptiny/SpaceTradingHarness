@@ -81,7 +81,6 @@ interface WorkingMemory {
   goals: unknown[];
   notes: unknown[];
   recentSummaries: unknown[];
-  rateBudget: { remaining: number | null; limit: number | null };
   limits: { maxActions: number; maxRounds: number };
   alerts: string[];
 }
@@ -206,7 +205,6 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     goals: memory.activeGoals(),
     notes: memory.recall(undefined, undefined, 8).map(n => ({ id: n.id, kind: n.kind, content: n.content, tags: n.tags })),
     recentSummaries: summaries.recent(3).map(s => ({ wake: s.wake, text: s.text })),
-    rateBudget: { remaining: runtime.rate.remaining, limit: runtime.rate.limit },
     limits: {
       maxActions: Math.max(config.agent.maxActionsPerWake, config.agent.actionsPerShip * (ships?.length ?? 0)),
       maxRounds: config.agent.maxRoundsPerWake,

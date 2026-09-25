@@ -127,7 +127,6 @@ const cooldownClear:   Guard
 | `plan_route(origin, destination)` | fuel/time-optimal path over cached waypoint graph |
 | `get_agent_events` | recent agent events feed (credit changes etc.) |
 | `get_jump_gate` / `get_construction` / `get_supply_chain` | universe data reads |
-| `get_rate_budget` | remaining requests this window — let the agent self-throttle |
 | `remember / recall / forget` | persistent memory between loops — see §6.2 |
 | `set_goal / complete_goal` | durable objectives with deadline + status — see §6.2 |
 
@@ -138,6 +137,7 @@ const cooldownClear:   Guard
 - ~~`PATCH .../nav`~~ — folded into `navigate` as a `flightMode` option.
 - `GET /my/socket.io` — connection management belongs to the harness event ingest (`src/events/socket.ts`), not the agent.
 - `chart` — low value; revisit if leaderboard play matters.
+- `get_rate_budget` — the transport paces every request and waits out 429s, so a rate-limited call is only delayed; the model has nothing to decide with the numbers. The panel's rate gauge shows them to the operator.
 
 ### 2.7 Example minimal set (trading agent MVP)
 

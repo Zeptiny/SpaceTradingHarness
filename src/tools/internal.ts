@@ -2,8 +2,6 @@ import { z } from "zod";
 import { registerTool } from "./registry.js";
 import { memory } from "../state/memory.js";
 import { prices } from "../state/prices.js";
-import { runtime } from "../state/runtime.js";
-import { config } from "../config.js";
 import { clampWakeAt, secondsUntil } from "../utils/time.js";
 import { systemOf } from "../utils/symbols.js";
 import { distance, fuelCost } from "../utils/nav.js";
@@ -98,29 +96,6 @@ registerTool({
   handler: async ({ goalId }) => {
     const goal = memory.completeGoal(goalId);
     return { summary: goal ? `goal ${goalId} completed` : `unknown goal ${goalId}`, result: goal ?? null };
-  },
-});
-
-registerTool({
-  name: "get_rate_budget",
-  description: "Remaining API requests in the current rate window. You rarely need this: the harness paces and retries requests itself. Not a way to wait — use wait_for_ship.",
-  kind: "internal",
-  input: z.object({}).strict(),
-  rateCost: 0,
-  handler: async () => {
-    const { limit, remaining, resetAt } = runtime.rate;
-    const pacing = `harness paces requests ${config.transport.minIntervalMs}ms apart and retries 429s`;
-    return {
-      summary: remaining === null
-        ? `no rate-limit headers seen from the server yet; ${pacing}`
-        : `rate: ${remaining} remaining of ${limit ?? "?"}; ${pacing}`,
-      result: {
-        limit,
-        remaining,
-        resetAt: resetAt !== null ? new Date(resetAt).toISOString() : null,
-        minIntervalMs: config.transport.minIntervalMs,
-      },
-    };
   },
 });
 
