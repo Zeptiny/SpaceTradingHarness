@@ -12,6 +12,11 @@ export function compactCargo(c: ShipCargo) {
   };
 }
 
+/** False for a ship record missing the parts working memory reads (nav, fuel, cargo, cooldown). */
+export function isUsableShip(s: Ship | undefined): s is Ship {
+  return !!s && typeof s.symbol === "string" && !!s.nav && !!s.fuel && !!s.cargo && !!s.cooldown;
+}
+
 export function compactShip(s: Ship) {
   const route = s.nav.status === "IN_TRANSIT" && s.nav.route
     ? {
