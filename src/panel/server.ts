@@ -188,7 +188,9 @@ export function startPanel(): void {
     if (Number.isFinite(since) && since > 0) q.since = since;
     const limit = Number(req.query.limit);
     if (Number.isFinite(limit) && limit > 0 && limit <= 1000) q.limit = limit;
-    res.json(activity.query(q));
+    // Reasoning can be long; only the per-wake transcript needs it.
+    const entries = activity.query(q);
+    res.json(q.wake === undefined ? entries.map(({ reasoning: _r, ...e }) => e) : entries);
   });
 
   app.get("/api/summaries", (req, res) => {

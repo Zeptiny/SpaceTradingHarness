@@ -18,6 +18,8 @@ export interface ActivityEntry {
   requestsSpent?: number | undefined;
   durationMs?: number | undefined;
   text?: string | undefined;
+  /** Model's native reasoning for a thought entry, when the endpoint returns it. */
+  reasoning?: string | undefined;
 }
 
 const RING = 1_000;
@@ -28,7 +30,7 @@ class ActivityLog {
   private file = dataFile("activity.jsonl");
 
   constructor() {
-    for (const e of parseJsonl(readTail(this.file)) as ActivityEntry[]) {
+    for (const e of parseJsonl(readTail(this.file, 4 * 1024 * 1024)) as ActivityEntry[]) {
       if (typeof e.id === "number" && Number.isFinite(e.id)) {
         this.entries.push(e);
         this.nextId = Math.max(this.nextId, e.id + 1);

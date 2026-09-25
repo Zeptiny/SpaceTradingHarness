@@ -219,6 +219,7 @@ interface PlannedCall {
 
 interface PlanResponse {
   thought: string;
+  reasoning: string | null;
   calls: PlannedCall[];
   message: ChatMessage;
   usage: { prompt: number; completion: number; cached: number };
@@ -253,9 +254,10 @@ async function think(messages: ChatMessage[]): Promise<PlanResponse> {
     }
   }
 
-  const message: ChatMessage = {
+  const message = {
     role: "assistant",
     content: thought || null,
+    ...(config.llm.echoReasoning ? result.reasoningFields : {}),
     ...(calls.length
       ? {
           tool_calls: calls.map(c => ({
@@ -265,8 +267,8 @@ async function think(messages: ChatMessage[]): Promise<PlanResponse> {
           })),
         }
       : {}),
-  };
-  return { thought, calls, message, usage: result.usage };
+  } as ChatMessage;
+  return { thought, reasoning: result.reasoning, calls, message, usage: result.usage };
 }
 
 // Tool results are compact projections (see state/projections.ts); the cap is
@@ -274,6 +276,15 @@ async function think(messages: ChatMessage[]): Promise<PlanResponse> {
 const MAX_TOOL_RESULT_CHARS = 8_000;
 const MAX_CONTEXT_CHARS = 150_000;
 const ELIDED = "[elided for context budget]";
+// Per-entry cap on reasoning kept in the activity log.
+const MAX_LOGGED_REASONING_CHARS = 24_000;
+
+function clipReasoning(r: string | null): string | undefined {
+  if (!r) return undefined;
+  return r.length > MAX_LOGGED_REASONING_CHARS
+    ? `${r.slice(0, MAX_LOGGED_REASONING_CHARS)}…[${r.length - MAX_LOGGED_REASONING_CHARS} more chars not logged]`
+    : r;
+}
 
 function stableKey(v: unknown): string {
   if (v !== null && typeof v === "object" && !Array.isArray(v)) {
@@ -431,7 +442,9 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
       tokens.cached += response.usage.cached;
 
       messages.push(response.message);
-      if (response.thought.trim()) activity.append({ kind: "thought", text: response.thought.trim() });
+      if (response.thought.trim() || response.reasoning) {
+        activity.append({ kind: "thought", text: response.thought.trim(), reasoning: clipReasoning(response.reasoning) });
+      }
       plan = { thought: response.thought, calls: response.calls.map(c => ({ tool: c.tool, args: c.args })) };
       bus.emit({ type: "PlanUpdated", ts: Date.now(), thought: response.thought, calls: plan.calls });
       if (!response.calls.length) {
