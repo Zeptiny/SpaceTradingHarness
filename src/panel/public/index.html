@@ -173,6 +173,9 @@ document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
   document.querySelectorAll("main section").forEach(s => s.classList.add("hidden"));
   $("#tab-" + b.dataset.tab).classList.remove("hidden");
   if (b.dataset.tab === "map") loadUniverse();
+  if (b.dataset.tab === "contracts") renderContracts(state.state?.contracts ?? []);
+  if (b.dataset.tab === "activity") loadActivity();
+  if (b.dataset.tab === "memory") loadMemory();
   if (b.dataset.tab === "markets") loadMarkets();
   if (b.dataset.tab === "agent") renderAgent();
   if (b.dataset.tab === "settings") renderSettings();
@@ -182,10 +185,32 @@ function fmt(n) { return typeof n === "number" && Number.isFinite(n) ? n.toLocal
 function ago(ts) { return new Date(ts).toLocaleTimeString(); }
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function num(v, d = 0) { const n = Number(v); return Number.isFinite(n) ? n : d; }
+function isOpen(tab) { return !$("#tab-" + tab).classList.contains("hidden"); }
+
+// Only touch the DOM when the markup actually changed. Rewriting innerHTML with
+// identical content still tears down and rebuilds every node, which resets hover
+// state, closes open dropdowns and collapses expanded rows — the "flicker".
+const lastHTML = new WeakMap();
+function setHTML(sel, html) {
+  const el = typeof sel === "string" ? $(sel) : sel;
+  if (lastHTML.get(el) === html) return;
+  lastHTML.set(el, html);
+  el.innerHTML = html;
+}
+
+// Drop responses that arrive after a newer request for the same view was sent,
+// so a slow fetch can't paint stale data over fresh data.
+const latestReq = {};
+async function fetchLatest(key, url) {
+  const id = (latestReq[key] = (latestReq[key] ?? 0) + 1);
+  const data = await (await fetch(url)).json();
+  return id === latestReq[key] ? data : undefined;
+}
 
 async function refreshState() {
-  const r = await fetch("/api/state");
-  state.state = await r.json();
+  const data = await fetchLatest("state", "/api/state");
+  if (data === undefined) return;
+  state.state = data;
   render();
 }
 
@@ -217,25 +242,26 @@ function render() {
       kv("socket", s.socket?.connected ? "connected" : "off"),
       kv("directive", s.scheduler?.directive ?? "–")]),
   ];
-  $("#dashCards").innerHTML = cards.join("");
+  setHTML("#dashCards", cards.join(""));
 
   const plan = s.plan?.plan;
-  $("#planBox").innerHTML = plan
+  setHTML("#planBox", plan
     ? `<div>${esc(plan.thought || "")}</div>` +
       plan.calls.map(c => `<div class="call">→ ${esc(c.tool)}(${esc(JSON.stringify(c.args ?? {}))})</div>`).join("") +
       `<div class="dim" style="margin-top:6px">wake #${s.plan.wakeId} · ${ago(s.plan.ts)} · ${esc(s.plan.reason)}</div>`
-    : "no plan yet";
+    : "no plan yet");
 
   renderFleet(s.fleet);
-  if (!$("#tab-contracts").classList.contains("hidden")) renderContracts(s.contracts);
-  if (!$("#tab-agent").classList.contains("hidden")) renderWakeups(s);
+  if (isOpen("contracts")) renderContracts(s.contracts);
+  if (isOpen("agent")) renderWakeups(s);
+  if (isOpen("settings")) renderSettings();
 }
 
 function card(title, rows) { return `<div class="card"><div class="kv"><b>${esc(title)}</b></div>${rows.join("")}</div>`; }
 function kv(k, v) { return `<div class="kv"><span class="k">${esc(k)}</span><span>${esc(v)}</span></div>`; }
 
 function renderFleet(ships) {
-  $("#fleetCards").innerHTML = ships.map(sh => {
+  setHTML("#fleetCards", ships.map(sh => {
     const st = NAV_STATUSES.includes(sh.nav?.status) ? sh.nav.status : "DOCKED";
     const fuelPct = num(sh.fuel?.capacity) > 0 ? (num(sh.fuel?.current) / num(sh.fuel?.capacity)) * 100 : 0;
     const cargoPct = num(sh.cargo?.capacity) > 0 ? (num(sh.cargo?.units) / num(sh.cargo?.capacity)) * 100 : 0;
@@ -248,16 +274,18 @@ function renderFleet(ships) {
       <div class="dim">cargo ${num(sh.cargo?.units)}/${num(sh.cargo?.capacity)}</div>
       <div class="bar"><i style="width:${Math.min(100, cargoPct)}%"></i></div>
     </div>`;
-  }).join("") || '<div class="dim">no ships cached (agent has not run yet)</div>';
+  }).join("") || '<div class="dim">no ships cached (agent has not run yet)</div>');
 }
 
 // ---- Map ----
 async function loadUniverse() {
-  state.universe = await (await fetch("/api/universe")).json();
+  const data = await fetchLatest("universe", "/api/universe");
+  if (data === undefined) return;
+  state.universe = data;
   const systems = state.universe.systems ?? [];
   const sel = $("#systemSelect");
   const current = sel.value;
-  sel.innerHTML = systems.map(s => `<option>${esc(s.symbol)}</option>`).join("") || "<option>no systems cached</option>";
+  setHTML(sel, systems.map(s => `<option>${esc(s.symbol)}</option>`).join("") || "<option>no systems cached</option>");
   if (current && systems.some(s => s.symbol === current)) sel.value = current;
   sel.onchange = renderMap;
   renderMap();
@@ -284,31 +312,33 @@ function renderMap() {
       <text y="-12" text-anchor="middle" font-size="9" fill="var(--dim)">${esc(w.symbol.split("-").pop())}</text>
     </g>`;
   }).join("");
-  $("#mapBox").innerHTML = `<svg viewBox="0 0 ${size} ${size}" width="100%" style="max-width:${size}px">${dots}</svg>`;
-  $("#transitFeed").innerHTML = (u.inTransit ?? []).map(t =>
+  setHTML("#mapBox", `<svg viewBox="0 0 ${size} ${size}" width="100%" style="max-width:${size}px">${dots}</svg>`);
+  setHTML("#transitFeed", (u.inTransit ?? []).map(t =>
     `<div class="entry">${esc(t.symbol)}: ${esc(t.from)} → ${esc(t.to)} <span class="dim">arrives ${esc(new Date(t.arrival).toLocaleTimeString())}</span></div>`
-  ).join("") || '<div class="dim">nothing in transit</div>';
+  ).join("") || '<div class="dim">nothing in transit</div>');
 }
 
 // ---- Markets ----
 async function loadMarkets() {
   const good = $("#goodFilter").value.trim().toUpperCase();
   const q = good ? `?good=${encodeURIComponent(good)}&limit=60` : "?limit=40";
-  state.marketHistory = await (await fetch("/api/markets/history" + q)).json();
+  const data = await fetchLatest("markets", "/api/markets/history" + q);
+  if (data === undefined) return;
+  state.marketHistory = data;
   renderMarkets();
 }
 function renderMarkets() {
   const rows = state.marketHistory.slice(0, 100).map(p =>
     `<tr><td>${esc(p.good)}</td><td>${esc(p.waypoint)}</td><td>${fmt(p.purchasePrice)}</td><td>${fmt(p.sellPrice)}</td><td>${fmt(p.volume)}</td><td>${ago(p.ts)}</td></tr>`
   ).join("");
-  $("#marketsTable").innerHTML = rows
+  setHTML("#marketsTable", rows
     ? `<table><tr><th>good</th><th>waypoint</th><th>buy</th><th>sell</th><th>vol</th><th>seen</th></tr>${rows}</table>`
-    : '<div class="dim">no price history yet — it fills as the agent reads markets</div>';
+    : '<div class="dim">no price history yet — it fills as the agent reads markets</div>');
 }
 
 // ---- Contracts ----
 function renderContracts(contracts) {
-  $("#contractsBoard").innerHTML = contracts.map(c => {
+  setHTML("#contractsBoard", contracts.map(c => {
     const dl = c.deadlineToAccept ? Date.parse(c.deadlineToAccept) : (c.expiration ? Date.parse(c.expiration) : null);
     const dlCls = dl ? (dl < Date.now() ? "over" : dl < Date.now() + 86400000 ? "soon" : "") : "";
     const deliverables = (c.deliverables ?? []).map(d => {
@@ -323,7 +353,7 @@ function renderContracts(contracts) {
       ${dl ? `<div class="kv"><span class="k">deadline</span><span class="deadline ${dlCls}">${new Date(dl).toLocaleString()}</span></div>` : ""}
       ${deliverables}
     </div>`;
-  }).join("") || '<div class="dim">no contracts cached</div>';
+  }).join("") || '<div class="dim">no contracts cached</div>');
 }
 
 // ---- Activity ----
@@ -333,7 +363,9 @@ async function loadActivity() {
   const q = new URLSearchParams();
   if (tool) q.set("tool", tool);
   if (outcome) q.set("outcome", outcome);
-  state.activity = await (await fetch("/api/activity?" + q)).json();
+  const data = await fetchLatest("activity", "/api/activity?" + q);
+  if (data === undefined) return;
+  state.activity = data;
   const brief = r => {
     if (r == null) return "";
     if (Array.isArray(r)) return `${r.length} items`;
@@ -343,58 +375,70 @@ async function loadActivity() {
     }
     return String(r);
   };
-  $("#activityFeed").innerHTML = state.activity.slice().reverse().map(e => {
+  setHTML("#activityFeed", state.activity.slice().reverse().map(e => {
     if (e.kind === "tool") {
-      return `<div class="entry details" onclick="this.querySelector('pre').classList.toggle('hidden')">
+      return `<div class="entry details" data-id="${num(e.id)}">
         <span class="oc-${esc(e.outcome)}">${esc(e.outcome)}</span> <b>${esc(e.tool)}</b>
         <span class="meta">${ago(e.ts)} · ${num(e.requestsSpent)} req · ${num(e.durationMs)}ms</span>
         <div>${esc(brief(e.result))}</div>
-        <pre class="hidden">${esc(JSON.stringify({ args: e.args, guards: e.guards, result: e.result }, null, 1).slice(0, 4000))}</pre>
+        <pre class="${expandedActivity.has(num(e.id)) ? "" : "hidden"}">${esc(JSON.stringify({ args: e.args, guards: e.guards, result: e.result }, null, 1).slice(0, 4000))}</pre>
       </div>`;
     }
     return `<div class="entry"><span class="meta">[${esc(e.kind)}] ${ago(e.ts)}</span> ${esc(e.text ?? "")}</div>`;
-  }).join("") || '<div class="dim">empty</div>';
+  }).join("") || '<div class="dim">empty</div>');
 }
+// Expanded rows are remembered by id so new activity doesn't collapse them.
+const expandedActivity = new Set();
+$("#activityFeed").onclick = (ev) => {
+  const row = ev.target.closest(".entry.details");
+  if (!row || getSelection().toString()) return;
+  const id = num(row.dataset.id);
+  const open = row.querySelector("pre").classList.toggle("hidden") === false;
+  if (open) expandedActivity.add(id); else expandedActivity.delete(id);
+  lastHTML.delete($("#activityFeed")); // DOM no longer matches the cached markup
+};
 $("#actFilter").oninput = () => loadActivity();
 $("#actOutcome").onchange = () => loadActivity();
 
 async function loadSummaries() {
-  const items = await (await fetch("/api/summaries")).json();
-  $("#summariesFeed").innerHTML = items.map(s =>
+  const items = await fetchLatest("summaries", "/api/summaries");
+  if (items === undefined) return;
+  setHTML("#summariesFeed", items.map(s =>
     `<div class="entry"><span class="meta">wake #${num(s.wake)} · ${ago(s.ts)} · ${esc(s.reason)}</span><div>${esc(s.text)}</div></div>`
-  ).join("") || '<div class="dim">no wakes yet</div>';
-  $("#dashSummaries").innerHTML = items.slice(0, 5).map(s =>
-    `<div class="entry"><span class="meta">wake #${num(s.wake)}</span> ${esc(s.text)}</div>`).join("");
+  ).join("") || '<div class="dim">no wakes yet</div>');
+  setHTML("#dashSummaries", items.slice(0, 5).map(s =>
+    `<div class="entry"><span class="meta">wake #${num(s.wake)}</span> ${esc(s.text)}</div>`).join(""));
 }
 
 // ---- Agent tab ----
 function renderWakeups(s) {
-  $("#wakeups").innerHTML = (s.scheduler?.pending ?? []).map(w =>
+  setHTML("#wakeups", (s.scheduler?.pending ?? []).map(w =>
     `<div class="entry"><span class="meta">${new Date(num(w.at)).toLocaleTimeString()}</span> ${esc(w.reason)} <span class="dim">(${esc(w.scope)})</span></div>`
-  ).join("") || '<div class="dim">nothing scheduled</div>';
+  ).join("") || '<div class="dim">nothing scheduled</div>');
 }
 
 async function renderAgent() {
   renderWakeups(state.state);
   if (!state.tools) state.tools = await (await fetch("/api/tools")).json();
-  $("#toolList").innerHTML = state.tools.map(t =>
+  setHTML("#toolList", state.tools.map(t =>
     `<div class="entry"><b>${esc(t.name)}</b> <span class="dim">${esc(t.kind)} · ~${num(t.rateCost)} req</span><div class="dim">${esc(t.description)}</div></div>`
-  ).join("");
+  ).join(""));
 }
 
 // ---- Memory ----
 async function loadMemory() {
-  const m = await (await fetch("/api/memory")).json();
-  $("#goals").innerHTML = m.goals.map(g => `
+  const m = await fetchLatest("memory", "/api/memory");
+  if (m === undefined) return;
+  setHTML("#goals", m.goals.map(g => `
     <div class="entry goal"><div>
       <span class="badge ${g.status === "active" ? "b-IN_ORBIT" : "b-DOCKED"}">${esc(g.status)}</span>
       ${esc(g.description)} ${g.deadline ? `<span class="dim">due ${esc(g.deadline)}</span>` : ""}
     </div>
     ${g.status === "active" ? `<button class="btn ok" onclick="completeGoal('${esc(g.id)}')">✓</button>` : ""}</div>`
-  ).join("") || '<div class="dim">no goals</div>';
-  $("#notes").innerHTML = m.notes.slice().reverse().map(n =>
+  ).join("") || '<div class="dim">no goals</div>');
+  setHTML("#notes", m.notes.slice().reverse().map(n =>
     `<div class="entry"><span class="meta">[${esc(n.kind)}] imp ${num(n.importance)} · ${esc((n.tags ?? []).join(", ")) || "no tags"}</span><div>${esc(n.content)}</div></div>`
-  ).join("") || '<div class="dim">agent has not remembered anything yet</div>';
+  ).join("") || '<div class="dim">agent has not remembered anything yet</div>');
 }
 window.completeGoal = async (id) => {
   await fetch("/api/memory/goals/" + encodeURIComponent(id) + "/complete", { method: "POST" });
@@ -412,12 +456,12 @@ $("#btnGoal").onclick = async () => {
 function renderSettings() {
   const c = state.state?.config ?? {};
   const s = state.state?.socket ?? {};
-  $("#settingsCards").innerHTML = [
-    card("Runtime", [kv("model", c.model), kv("policy", c.policy), kv("panel port", c.port), kv("now", new Date().toLocaleTimeString())]),
+  setHTML("#settingsCards", [
+    card("Runtime", [kv("model", c.model), kv("policy", c.policy), kv("panel port", c.port)]),
     card("Budgets", [kv("min request interval", c.minIntervalMs + "ms"), kv("max actions/wake", c.maxActionsPerWake), kv("fallback wake", (c.fallbackWakeMs ?? 0) / 60000 + "min")]),
     card("Socket ingest", [kv("connected", String(!!s.connected)), kv("events", num(s.events)), kv("last event", s.lastEventAt ? ago(s.lastEventAt) : "–")]),
     card("Secrets", [kv("API token", "loaded from .env (never shown)"), kv("LLM key", "loaded from .env (never shown)")]),
-  ].join("");
+  ].join(""));
 }
 
 // ---- Controls ----
@@ -428,19 +472,34 @@ $("#btnDirective").onclick = async () => {
   await fetch("/api/agent/directive", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify({ text: $("#directiveInput").value }) });
 };
 
-// ---- SSE with debounced refresh ----
+// ---- SSE with throttled refresh ----
+// Every API call the agent makes emits RateBudgetChanged/StateChanged, so during
+// a wake events arrive continuously. Refresh at most once per REFRESH_MS, only
+// the views that are visible, and not at all while the browser tab is hidden.
+const REFRESH_MS = 1500;
 let lastEvent = 0;
 let refreshTimer = null;
+let lastRefresh = 0;
+let refreshMissed = false;
+function refreshVisible() {
+  lastRefresh = Date.now();
+  refreshState(); loadSummaries();
+  if (isOpen("activity")) loadActivity();
+  if (isOpen("memory")) loadMemory();
+  if (isOpen("map")) loadUniverse();
+  if (isOpen("markets")) loadMarkets();
+}
 function scheduleRefresh() {
+  if (document.hidden) { refreshMissed = true; return; }
   if (refreshTimer) return;
   refreshTimer = setTimeout(() => {
     refreshTimer = null;
-    refreshState(); loadActivity(); loadSummaries();
-    if (!$("#tab-memory").classList.contains("hidden")) loadMemory();
-    if (!$("#tab-map").classList.contains("hidden")) loadUniverse();
-    if (!$("#tab-markets").classList.contains("hidden")) loadMarkets();
-  }, 400);
+    refreshVisible();
+  }, Math.max(0, lastRefresh + REFRESH_MS - Date.now()));
 }
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && refreshMissed) { refreshMissed = false; scheduleRefresh(); }
+});
 function connect() {
   const es = new EventSource("/api/events?since=" + lastEvent);
   es.onopen = () => { $("#conn").textContent = "◉ live"; $("#conn").className = "live"; };
@@ -452,7 +511,7 @@ function connect() {
   };
 }
 
-refreshState(); loadActivity(); loadSummaries(); loadMemory();
+refreshState(); loadSummaries();
 connect();
 </script>
 </body>
