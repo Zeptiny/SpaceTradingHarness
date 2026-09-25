@@ -12,11 +12,23 @@ type WakeListener = (wakeup: Wakeup) => void;
 
 const MAX_WAKEUPS = 200;
 
-class Scheduler {
+// Entries due within this much of the firing wake ride along with it.
+const DUE_SLACK_MS = 50;
+
+// Adds a reason to a "; "-joined list unless it is already there, so repeated
+// merges never stack the same reason twice.
+function joinReason(existing: string, add: string): string {
+  return `; ${existing}; `.includes(`; ${add}; `) ? existing : `${existing}; ${add}`;
+}
+
+export class Scheduler {
   private wakeups: Wakeup[] = [];
   private timer: NodeJS.Timeout | null = null;
   private armedFor: number | null = null;
   private listeners: WakeListener[] = [];
+  // Set while a wake runs. Due entries wait in the queue instead of firing,
+  // then go out together as one wake when the loop frees up.
+  private busy = false;
   paused = false;
   pausedShips = new Set<string>();
   directive: string | null = null;
@@ -42,7 +54,7 @@ class Scheduler {
     );
     if (dup) {
       dup.at = Math.max(dup.at, w.at);
-      dup.reason = dup.reason === w.reason ? dup.reason : `${dup.reason}; ${w.reason}`;
+      dup.reason = joinReason(dup.reason, w.reason);
     } else {
       this.wakeups.push(w);
     }
@@ -58,10 +70,48 @@ class Scheduler {
 
   wakeNow(reason: string, opts: { ignorePause?: boolean } = {}): void {
     if (this.paused && !opts.ignorePause) return;
-    this.fire({ at: Date.now(), reason, scope: "all" });
+    const w: Wakeup = { at: Date.now(), reason, scope: "all" };
+    if (this.busy) {
+      // Runs as soon as the current wake ends, merged with whatever else is due.
+      this.push(w);
+      return;
+    }
+    this.fire(this.takeDue(w));
+  }
+
+  /** Marks the agent loop as running (hold due wakes) or free (release them). */
+  setBusy(busy: boolean): void {
+    this.busy = busy;
+    if (busy) this.disarm();
+    else this.arm();
+  }
+
+  // Removes every entry that is due and folds it, plus `extra` if given, into
+  // one wake: a wake refreshes the whole fleet, so ships whose timers came due
+  // together (or piled up behind a running wake) share one wake and all their
+  // reasons, instead of queueing a full wake each.
+  private takeDue(extra?: Wakeup): Wakeup {
+    const now = Date.now();
+    const due = this.wakeups.filter(w => w.at <= now + DUE_SLACK_MS);
+    this.wakeups = this.wakeups.filter(w => w.at > now + DUE_SLACK_MS);
+    this.syncRuntime();
+    const all = extra ? [extra, ...due] : due;
+    const scopes = new Set(all.map(w => w.scope));
+    return {
+      at: now,
+      reason: all.map(w => w.reason).reduce(joinReason),
+      scope: scopes.size === 1 ? all[0]!.scope : "all",
+    };
+  }
+
+  private disarm(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.armedFor = null;
   }
 
   private arm(): void {
+    if (this.busy) return; // setBusy(false) re-arms
     const next = this.wakeups[0];
     if (!next) {
       if (this.timer) {
@@ -94,9 +144,8 @@ class Scheduler {
       this.arm();
       return;
     }
-    this.wakeups.shift();
-    this.syncRuntime();
-    this.fire(head);
+    if (this.busy) return; // held until setBusy(false)
+    this.fire(this.takeDue());
     this.arm();
   }
 
