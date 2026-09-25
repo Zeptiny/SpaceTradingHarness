@@ -407,7 +407,7 @@ function renderChrome() {
   // identity + meta
   if (st?.agent) $("#agentIdent").textContent = `${st.agent.symbol} · ${st.agent.headquarters}`;
   if (st) {
-    patch($("#railMeta"), `model <b>${esc(st.config.model)}</b><br>policy <b class="${st.config.policy === "readonly" ? "warn" : ""}">${esc(st.config.policy)}</b><br>requests <b>${esc(fmtInt(st.requestsTotal))}</b> · up <b data-elapsed="${st.startedAt}">${esc(fmtDur(Date.now() - st.startedAt))}</b>`);
+    patch($("#railMeta"), `model <b>${esc(st.config.model)}</b><br>policy <b class="${st.config.policy === "readonly" ? "warn" : ""}">${esc(st.config.policy)}</b><br>requests <b>${esc(fmtInt(st.usage?.requests ?? st.requestsTotal))}</b> · up <b data-elapsed="${st.startedAt}">${esc(fmtDur(Date.now() - st.startedAt))}</b>`);
   }
 
   // status strip
@@ -439,8 +439,8 @@ function renderChrome() {
   dEl.textContent = delta == null ? "" : `${delta > 0 ? "▲" : delta < 0 ? "▼" : "•"} ${fmtCompact(Math.abs(delta))} 24h`;
   renderRate();
   if (st) {
-    const t = st.llm.promptTokens + st.llm.completionTokens;
-    $("#stripTokens").textContent = `${fmtCompact(t)} · ${fmtInt(st.llm.calls)} calls`;
+    const u = st.usage ?? { promptTokens: st.llm.promptTokens, completionTokens: st.llm.completionTokens, llmCalls: st.llm.calls };
+    $("#stripTokens").textContent = `${fmtCompact(u.promptTokens + u.completionTokens)} · ${fmtInt(u.llmCalls)} calls`;
     const paused = st.scheduler.paused;
     const b = $("#btnPause");
     b.textContent = paused ? "Resume" : "Pause";
@@ -509,9 +509,12 @@ VIEWS.overview = {
     patch($("#tWakes"), `<span class="tile-label">Wakes · 24h</span><span class="tile-value">${day.length}</span>
       <div class="tile-foot"><span>avg ${esc(fmtDur(avg))}</span><span class="sep">|</span><span class="${failed ? "warn" : ""}">${failed} failed call${failed === 1 ? "" : "s"}</span></div>`);
 
+    // Totals survive restarts; the session figure is since this start.
     const llm = st.llm;
-    patch($("#tLlm"), `<span class="tile-label">LLM usage · session</span><span class="tile-value">${esc(fmtCompact(llm.promptTokens + llm.completionTokens))}<small>tokens</small></span>
-      <div class="tile-foot"><span>${fmtInt(llm.calls)} calls</span><span class="sep">|</span><span>${llm.promptTokens ? Math.round((llm.cachedTokens / llm.promptTokens) * 100) : 0}% cached</span>${llm.errors ? `<span class="sep">|</span><span class="bad">${llm.errors} errors</span>` : ""}</div>`);
+    const tot = st.usage ?? { promptTokens: llm.promptTokens, completionTokens: llm.completionTokens, cachedTokens: llm.cachedTokens, llmCalls: llm.calls, since: st.startedAt };
+    const session = llm.promptTokens + llm.completionTokens;
+    patch($("#tLlm"), `<span class="tile-label" title="since ${esc(fmtTime(tot.since))}">LLM usage · total</span><span class="tile-value">${esc(fmtCompact(tot.promptTokens + tot.completionTokens))}<small>tokens</small></span>
+      <div class="tile-foot"><span>${fmtInt(tot.llmCalls)} calls</span><span class="sep">|</span><span>${tot.promptTokens ? Math.round((tot.cachedTokens / tot.promptTokens) * 100) : 0}% cached</span><span class="sep">|</span><span>${esc(fmtCompact(session))} this session</span>${llm.errors ? `<span class="sep">|</span><span class="bad">${llm.errors} errors</span>` : ""}</div>`);
 
     // credits
     patch($("#rangeChips"), [24, 48, 168].map(h => `<button class="chip-btn" data-act="range" data-h="${h}" aria-pressed="${UI.creditRange === h}">${h === 168 ? "7d" : `${h}h`}</button>`).join(""));
@@ -1504,8 +1507,10 @@ VIEWS.agent = {
       ["Model", c.model], ["Policy", c.policy], ["Max actions / wake", c.maxActionsPerWake], ["Max rounds / wake", c.maxRoundsPerWake],
       ["Tool concurrency", c.maxConcurrentTools], ["Fallback wake", fmtDur(c.fallbackWakeMs)], ["Wake merge window", fmtDur(c.minWakeGapMs)],
       ["Min request interval", `${c.minIntervalMs} ms`], ["API requests (session)", fmtInt(st.requestsTotal)],
-      ["LLM calls", fmtInt(l.calls)], ["Prompt tokens", fmtInt(l.promptTokens)], ["Cached prompt tokens", fmtInt(l.cachedTokens)],
-      ["Completion tokens", fmtInt(l.completionTokens)], ["LLM errors", fmtInt(l.errors)],
+      ...(st.usage ? [["Usage totals since", fmtTime(st.usage.since)], ["API requests (total)", fmtInt(st.usage.requests)],
+        ["LLM calls (total)", fmtInt(st.usage.llmCalls)], ["Tokens (total)", fmtInt(st.usage.promptTokens + st.usage.completionTokens)]] : []),
+      ["LLM calls (session)", fmtInt(l.calls)], ["Prompt tokens (session)", fmtInt(l.promptTokens)], ["Cached prompt tokens (session)", fmtInt(l.cachedTokens)],
+      ["Completion tokens (session)", fmtInt(l.completionTokens)], ["LLM errors (session)", fmtInt(l.errors)],
       ["Game event socket", st.socket.connected ? `connected · ${st.socket.events} events` : "off"], ["Panel port", c.port],
     ];
     patch($("#runtimeKv"), kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("") + (l.lastError ? `<dt>Last LLM error</dt><dd class="bad">${esc(l.lastError)}</dd>` : ""));

@@ -52,12 +52,21 @@ const TRADE_LOG_MS = 2 * 3600_000;
 
 class PriceHistory {
   private history: History = {};
-  /** Recent trades by any agent per `waypoint:good` (in memory; markets list them again on the next read). */
+  /**
+   * Recent trades by any agent per `waypoint:good`. Kept on disk too: a market
+   * only lists them again when a ship is there, so after a restart the rival
+   * traffic on routes nobody revisited read as zero.
+   */
   private trades = new Map<string, SeenTrade[]>();
   private file = dataFile("prices.json");
+  private tradesFile = dataFile("trades.json");
 
   constructor() {
     this.history = loadJson<History>(this.file, {});
+    const now = Date.now();
+    for (const [key, arr] of Object.entries(loadJson<Record<string, SeenTrade[]>>(this.tradesFile, {}))) {
+      if (Array.isArray(arr)) this.trades.set(key, arr.filter(t => typeof t?.ts === "number" && now - t.ts <= TRADE_LOG_MS));
+    }
   }
 
   private persist(): void {
@@ -88,6 +97,7 @@ class PriceHistory {
   }
 
   private recordTrades(txs: MarketTransaction[], now: number): void {
+    if (!txs.length) return;
     for (const t of txs) {
       const key = `${t.waypointSymbol}:${t.tradeSymbol}`;
       const ts = Date.parse(t.timestamp);
@@ -98,6 +108,7 @@ class PriceHistory {
       }
       this.trades.set(key, arr.filter(x => now - x.ts <= TRADE_LOG_MS));
     }
+    saveJsonAtomic(this.tradesFile, Object.fromEntries(this.trades));
   }
 
   /**

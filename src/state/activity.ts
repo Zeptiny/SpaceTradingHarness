@@ -46,6 +46,11 @@ class ActivityLog {
     return full;
   }
 
+  /** Highest wake id any entry carries. */
+  lastWake(): number {
+    return this.entries.reduce((n, e) => Math.max(n, e.wake ?? 0), 0);
+  }
+
   query(opts: {
     tool?: string | undefined;
     outcome?: ToolOutcome | undefined;

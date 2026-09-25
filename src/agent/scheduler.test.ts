@@ -2,6 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Scheduler, scheduler, type Wakeup } from "./scheduler.js";
 import { config } from "../config.js";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const gap = config.agent.minWakeGapMs;
 const of = (scope: string) => scheduler.pending().filter(w => w.scope === scope);
@@ -116,4 +119,47 @@ test("a manual wake during a busy loop runs right after it, merged with due wake
   assert.equal(fired.length, 1);
   assert.match(fired[0]!.reason, /manual wake/);
   assert.match(fired[0]!.reason, /TEAR-3 arrival/);
+});
+
+test("pause, directive and queued wakes survive a restart", () => {
+  const file = path.join(mkdtempSync(path.join(tmpdir(), "sched-")), "scheduler.json");
+  const before = new Scheduler();
+  before.restore(file);
+  const at = Date.now() + 10 * 60_000;
+  before.schedule(at, "TEAR-1 arrival", "TEAR-1");
+  before.setDirective("sell everything at H51");
+  before.setPaused(true);
+  before.setBusy(true); // disarm so the test process can exit
+  assert.equal(JSON.parse(readFileSync(file, "utf8")).paused, true);
+
+  const after = new Scheduler();
+  after.restore(file);
+  assert.equal(after.paused, true);
+  assert.equal(after.directive, "sell everything at H51");
+  assert.deepEqual(after.pending(), [{ at, reason: "TEAR-1 arrival", scope: "TEAR-1" }]);
+  after.setBusy(true); // disarm so the test process can exit
+});
+
+test("a wake that came due while the harness was down fires on restore", async () => {
+  const file = path.join(mkdtempSync(path.join(tmpdir(), "sched-")), "scheduler.json");
+  const before = new Scheduler();
+  before.restore(file);
+  before.schedule(Date.now() + 10, "TEAR-2 arrival", "TEAR-2");
+  before.setBusy(true); // the old process stops before it fires
+
+  await sleep(30);
+  const { s, fired } = fresh();
+  s.restore(file);
+  await sleep(30);
+  assert.equal(fired.length, 1);
+  assert.match(fired[0]!.reason, /TEAR-2 arrival/);
+});
+
+test("a missing or corrupt file restores nothing", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "sched-"));
+  const s = new Scheduler();
+  s.restore(path.join(dir, "absent.json"));
+  assert.equal(s.paused, false);
+  assert.equal(s.directive, null);
+  assert.deepEqual(s.pending(), []);
 });

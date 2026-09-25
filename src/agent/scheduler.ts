@@ -1,6 +1,7 @@
 import { config } from "../config.js";
 import { bus } from "../events/bus.js";
 import { runtime } from "../state/runtime.js";
+import { loadJson, saveJsonAtomic } from "../state/persist.js";
 
 export interface Wakeup {
   at: number;
@@ -9,6 +10,12 @@ export interface Wakeup {
 }
 
 type WakeListener = (wakeup: Wakeup) => void;
+
+interface SavedScheduler {
+  paused?: unknown;
+  directive?: unknown;
+  wakeups?: unknown;
+}
 
 const MAX_WAKEUPS = 200;
 
@@ -32,10 +39,43 @@ export class Scheduler {
   paused = false;
   pausedShips = new Set<string>();
   directive: string | null = null;
+  private file: string | null = null;
 
   constructor() {
     runtime.paused = false;
     runtime.directive = null;
+  }
+
+  /**
+   * Restores pause, the operator directive and queued wakes (ship arrivals,
+   * cooldowns, the agent's chosen wake time) from `file`, and saves them there
+   * on every change from now on, so a restart doesn't drop them. Wakes that
+   * came due while the harness was down fire straight away, merged.
+   */
+  restore(file: string): void {
+    this.file = file;
+    const saved = loadJson<SavedScheduler>(file, {});
+    if (saved.paused === true) {
+      this.paused = true;
+      runtime.paused = true;
+    }
+    if (typeof saved.directive === "string" && saved.directive.trim()) this.setDirective(saved.directive);
+    const wakeups = Array.isArray(saved.wakeups) ? saved.wakeups : [];
+    for (const w of wakeups as Partial<Wakeup>[]) {
+      if (typeof w?.at === "number" && Number.isFinite(w.at) && typeof w.reason === "string" && typeof w.scope === "string") {
+        this.push({ at: w.at, reason: w.reason, scope: w.scope });
+      }
+    }
+    this.save();
+  }
+
+  private save(): void {
+    if (!this.file) return;
+    try {
+      saveJsonAtomic(this.file, { paused: this.paused, directive: this.directive, wakeups: this.wakeups });
+    } catch (err) {
+      console.error("[scheduler] save failed:", err instanceof Error ? err.message : err);
+    }
   }
 
   onWake(fn: WakeListener): void {
@@ -161,6 +201,7 @@ export class Scheduler {
 
   private syncRuntime(): void {
     runtime.pendingWakeups = [...this.wakeups];
+    this.save();
   }
 
   pending(): Wakeup[] {
@@ -180,6 +221,7 @@ export class Scheduler {
   setDirective(text: string | null): void {
     this.directive = text ? text.slice(0, 2000) : null;
     runtime.directive = this.directive;
+    this.save();
   }
 }
 

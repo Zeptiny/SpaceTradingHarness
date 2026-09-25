@@ -8,6 +8,7 @@ import { summaries } from "../state/summaries.js";
 import { checkpointStore } from "../state/checkpoint.js";
 import { mirror, storeKeys, type FleetState } from "../state/store.js";
 import { runtime } from "../state/runtime.js";
+import { usage } from "../state/usage.js";
 import { prices } from "../state/prices.js";
 import { atlas } from "../state/atlas.js";
 import { galaxy, toRow } from "../state/galaxy.js";
@@ -103,6 +104,8 @@ export function startPanel(): void {
       wake: runtime.wake,
       lastWakeEndedAt: runtime.lastWakeEndedAt,
       llm: runtime.llm,
+      /** LLM and API usage summed across restarts (llm / requestsTotal are since this start). */
+      usage: usage.totals(),
       server: (() => {
         const sv = currentServer();
         return sv ? { nextReset: sv.nextReset, resetFrequency: sv.resetFrequency, leaderboards: sv.leaderboards, fetchedAt: sv.fetchedAt } : null;
