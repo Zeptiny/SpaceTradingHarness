@@ -21,27 +21,41 @@ export function startPanel(): void {
   app.disable("x-powered-by");
   app.use(express.json({ limit: "64kb" }));
 
-  // Localhost-only: reject foreign Host headers and cross-origin requests.
-  const allowedHosts = new Set([
-    `localhost:${config.panelPort}`,
-    `127.0.0.1:${config.panelPort}`,
-    `[::1]:${config.panelPort}`,
-  ]);
+  // Localhost-only by default: reject foreign Host headers (DNS rebinding) and cross-origin requests.
+  // PANEL_ALLOWED_HOSTS opts extra hostnames in; "*" accepts any Host but still requires same-origin.
+  const allowAny = config.panelAllowedHosts.includes("*");
+  const allowedHosts = new Set(["localhost", "127.0.0.1", "[::1]", ...config.panelAllowedHosts]);
+  const hostnameOf = (hostPort: string): string | null => {
+    try {
+      return new URL(`http://${hostPort}`).hostname.toLowerCase();
+    } catch {
+      return null;
+    }
+  };
   app.use("/api", (req, res, next) => {
-    if (!allowedHosts.has(req.headers.host ?? "")) {
-      res.status(403).json({ error: "panel is localhost-only" });
+    const host = req.headers.host ?? "";
+    const hostname = hostnameOf(host);
+    if (!hostname || (!allowAny && !allowedHosts.has(hostname))) {
+      res.status(403).json({
+        error: `panel is localhost-only; add "${hostname ?? host}" to PANEL_ALLOWED_HOSTS to allow it`,
+      });
       return;
     }
     const origin = req.headers.origin;
     if (origin) {
+      let o: URL | null = null;
       try {
-        const o = new URL(origin);
-        if (o.hostname !== "localhost" && o.hostname !== "127.0.0.1" && o.hostname !== "[::1]") {
-          res.status(403).json({ error: "cross-origin requests rejected" });
-          return;
-        }
+        o = new URL(origin);
       } catch {
+        // handled below
+      }
+      if (!o) {
         res.status(403).json({ error: "bad origin" });
+        return;
+      }
+      const ok = allowAny ? o.host === host : allowedHosts.has(o.hostname.toLowerCase());
+      if (!ok) {
+        res.status(403).json({ error: "cross-origin requests rejected" });
         return;
       }
     }

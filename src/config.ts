@@ -25,6 +25,11 @@ export const config = {
   },
   panelHost: process.env.PANEL_HOST ?? "127.0.0.1",
   panelPort: num("PANEL_PORT", 8787),
+  // Extra hostnames/IPs (comma-separated, port ignored) the panel accepts besides localhost; "*" accepts any.
+  panelAllowedHosts: (process.env.PANEL_ALLOWED_HOSTS ?? "")
+    .split(",")
+    .map(h => h.trim().toLowerCase())
+    .filter(Boolean),
   dataDir: path.resolve(process.env.DATA_DIR ?? "data"),
   agent: {
     policy: (process.env.AGENT_POLICY === "readonly" ? "readonly" : "full") as AgentPolicy,
