@@ -4,6 +4,7 @@
 //   npm run demo   →   http://127.0.0.1:8790
 import { rmSync } from "node:fs";
 import path from "node:path";
+import type { WakeReport } from "./state/summaries.js";
 
 // Env must be settled before config.ts is evaluated, so every harness module
 // is imported dynamically below. The base URL points nowhere: nothing in the
@@ -27,7 +28,7 @@ rmSync(dataDir, { recursive: true, force: true });
 
 const { bus } = await import("./events/bus.js");
 const { activity } = await import("./state/activity.js");
-const { summaries } = await import("./state/summaries.js");
+const { summaries, reportText } = await import("./state/summaries.js");
 const { memory } = await import("./state/memory.js");
 const { prices } = await import("./state/prices.js");
 const { creditHistory } = await import("./state/credits.js");
@@ -392,7 +393,7 @@ memory.remember("Jump gate I53 is still under construction — no cross-system t
 // ---------------------------------------------------------------- wake history
 
 type Call = { tool: string; args: Record<string, unknown>; outcome?: ToolOutcome; summary: string; result?: unknown; req?: number; ms?: number; guards?: { guard: string; ok: boolean; reason?: string }[] };
-type Script = { reason: string; rounds: { thought: string; reasoning?: string; calls: Call[] }[]; summary: string; creditDelta: number };
+type Script = { reason: string; rounds: { thought: string; reasoning?: string; calls: Call[] }[]; report: WakeReport; creditDelta: number };
 
 const scripts: Script[] = [
   {
@@ -403,10 +404,10 @@ const scripts: Script[] = [
         { tool: "extract", args: { shipSymbol: "NYUU-3" }, summary: "NYUU-3 extracted 2x IRON_ORE, cargo 15/15", req: 2, ms: 1340, guards: [{ guard: "knownShip", ok: true }, { guard: "inOrbit", ok: true }, { guard: "cooldownClear", ok: true }, { guard: "shipHasMount(MOUNT_MINING_LASER)", ok: true }] },
       ] },
       { thought: "Cargo full. Nothing else to do for NYUU-3 until the hauler is back; ending the wake.", calls: [
-        { tool: "end_loop", args: { summary: "NYUU-3 mined 2 IRON_ORE and is full; waiting for NYUU-4 to return and collect." }, summary: "loop finished" },
+        { tool: "end_loop", args: { done: "NYUU-3 mined 2 IRON_ORE at F45; its hold is now full (15/15), so it cannot extract again.", next: "Wait for NYUU-4 to return to F45 and take the ore by transfer, since drones are too slow to haul it to H51 themselves.", summary: "Mining loop at F45 is on track; the only bottleneck is hauler round-trip time." }, summary: "loop finished" },
       ] },
     ],
-    summary: "NYUU-3 mined 2 IRON_ORE and is full; waiting for NYUU-4 to return and collect.",
+    report: { done: "NYUU-3 mined 2 IRON_ORE at F45; its hold is now full (15/15), so it cannot extract again.", next: "Wait for NYUU-4 to return to F45 and take the ore by transfer, since drones are too slow to haul it to H51 themselves.", summary: "Mining loop at F45 is on track; the only bottleneck is hauler round-trip time." },
   },
   {
     reason: "NYUU-4 arrival at X1-KD26-H51",
@@ -428,10 +429,10 @@ const scripts: Script[] = [
       ] },
       { thought: "Fulfill failed — probably a delivery lag. Retry next wake. Heading back to F45.", calls: [
         { tool: "navigate", args: { shipSymbol: "NYUU-4", waypointSymbol: wp("F45") }, summary: "NYUU-4 in transit to X1-KD26-F45 (CRUISE), fuel 522/600", req: 4, ms: 2310 },
-        { tool: "end_loop", args: { summary: "Delivered 52 IRON_ORE (contract 120/120), sold 18 ALUMINUM_ORE and refuelled. Fulfill was rejected — retrying next wake. NYUU-4 heading back to F45." }, summary: "loop finished" },
+        { tool: "end_loop", args: { done: "Delivered 52 IRON_ORE at H51, bringing the contract to 120/120, sold 18 ALUMINUM_ORE for 1314 cr because H51 imports it, and refuelled for the return leg.", next: "Retry fulfill_contract next wake (the rejection looks like delivery lag) and send NYUU-4 back to F45 to collect NYUU-3's ore.", summary: "Contract payout is pending on the retry; net +4.4K this wake." }, summary: "loop finished" },
       ] },
     ],
-    summary: "Delivered 52 IRON_ORE (contract 120/120), sold 18 ALUMINUM_ORE and refuelled. Fulfill was rejected — retrying next wake. NYUU-4 heading back to F45.",
+    report: { done: "Delivered 52 IRON_ORE at H51, bringing the contract to 120/120, sold 18 ALUMINUM_ORE for 1314 cr because H51 imports it, and refuelled for the return leg.", next: "Retry fulfill_contract next wake (the rejection looks like delivery lag) and send NYUU-4 back to F45 to collect NYUU-3's ore.", summary: "Contract payout is pending on the retry; net +4.4K this wake." },
   },
   {
     reason: "fallback periodic wake",
@@ -446,10 +447,10 @@ const scripts: Script[] = [
         { tool: "remember", args: { content: "Drones should not haul: transfer ore to NYUU-4 at F45 instead.", kind: "strategy", tags: ["NYUU-5"] }, summary: "noted (strategy): Drones should not haul: transfer ore to NYUU-4 at F45 instead." },
       ] },
       { thought: "Done for now.", calls: [
-        { tool: "end_loop", args: { summary: "NYUU-5 couldn't reach H51 on 12 fuel, so it refuelled at F45 and will hand its ore to NYUU-4 instead." }, summary: "loop finished" },
+        { tool: "end_loop", args: { done: "NYUU-5 couldn't reach H51 on 12 fuel, so it refuelled at F45 instead of drifting there with a full hold.", next: "Hand NYUU-5's ore to NYUU-4 when it arrives at F45, so the drone keeps mining rather than hauling.", summary: "Noted that drones should not haul; fuel spend this wake was 2.2K." }, summary: "loop finished" },
       ] },
     ],
-    summary: "NYUU-5 couldn't reach H51 on 12 fuel, so it refuelled at F45 and will hand its ore to NYUU-4 instead.",
+    report: { done: "NYUU-5 couldn't reach H51 on 12 fuel, so it refuelled at F45 instead of drifting there with a full hold.", next: "Hand NYUU-5's ore to NYUU-4 when it arrives at F45, so the drone keeps mining rather than hauling.", summary: "Noted that drones should not haul; fuel spend this wake was 2.2K." },
   },
 ];
 
@@ -520,19 +521,21 @@ async function playScript(sc: Script, opts: { baseTs?: number; live: boolean }):
     runtime.llm.calls += round; runtime.llm.promptTokens += tokens.prompt; runtime.llm.completionTokens += tokens.completion; runtime.llm.cachedTokens += tokens.cached;
     usage.llm(tokens);
   }
+  const text = reportText(sc.report);
   summaries.add({
     ts,
     reason: sc.reason,
-    text: sc.summary,
+    text,
+    report: sc.report,
     details: sc.rounds.flatMap(r => r.calls).map(c => c.summary).join("; "),
     actions: sc.rounds.flatMap(r => r.calls).map(c => ({ tool: c.tool, outcome: c.outcome ?? "ok" })),
     stats: { startedAt, durationMs: ts - startedAt, rounds: round, requests, tokens, creditsStart, creditsEnd, endedBy: "end_loop" },
   });
-  activity.append({ kind: "summary", ts, wake: id, text: sc.summary });
-  checkpointStore.save({ wakeId: id, reason: sc.reason, plan: { thought: sc.rounds.at(-1)!.thought, calls: sc.rounds.at(-1)!.calls.map(c => ({ tool: c.tool, args: c.args })) }, resultsSummary: sc.summary });
+  activity.append({ kind: "summary", ts, wake: id, text });
+  checkpointStore.save({ wakeId: id, reason: sc.reason, plan: { thought: sc.rounds.at(-1)!.thought, calls: sc.rounds.at(-1)!.calls.map(c => ({ tool: c.tool, args: c.args })) }, resultsSummary: text });
   runtime.wake = null;
   runtime.lastWakeEndedAt = ts;
-  if (opts.live) bus.emit({ type: "LoopSummary", ts, wake: id, text: sc.summary });
+  if (opts.live) bus.emit({ type: "LoopSummary", ts, wake: id, text });
 }
 
 // Live side effects so the fleet, credits and map visibly move.

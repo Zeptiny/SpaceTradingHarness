@@ -9,6 +9,10 @@
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+// The agent's end_loop report as labelled sections; older wakes and harness-ended ones only have text.
+const wakeReportHtml = (w, fallback = t => `<p class="thought">${esc(t)}</p>`) => w.report
+  ? `<div class="wake-report">${[["Done", w.report.done], ["Next", w.report.next], ["Summary", w.report.summary]].map(([k, v]) => `<div><h4>${k}</h4><p>${esc(v)}</p></div>`).join("")}</div>`
+  : fallback(w.text);
 const isNum = v => typeof v === "number" && Number.isFinite(v);
 const nf = new Intl.NumberFormat("en-US");
 const fmtInt = n => (isNum(n) ? nf.format(Math.round(n)) : "–");
@@ -576,7 +580,7 @@ VIEWS.overview = {
       const w = S.wakes[0];
       const next = st.scheduler.pending[0];
       patch($("#nowAside"), st.scheduler.paused ? '<span class="badge b-warn">paused</span>' : '<span class="badge b-good">standing by</span>');
-      patch(nowBody, `${w ? `<div class="muted" style="font-size:12px">last wake #${w.wake} · <span data-ago="${w.ts}">${esc(fmtAgo(w.ts))}</span></div><p class="thought">${esc(w.text)}</p><div class="statline">${wakeStatsTags(w)}</div>` : empty("No wakes yet.")}
+      patch(nowBody, `${w ? `<div class="muted" style="font-size:12px">last wake #${w.wake} · <span data-ago="${w.ts}">${esc(fmtAgo(w.ts))}</span></div>${wakeReportHtml(w)}<div class="statline">${wakeStatsTags(w)}</div>` : empty("No wakes yet.")}
         ${next ? `<div class="call-line" style="margin-top:4px"><span class="muted">next</span><b class="mono" data-cd="${next.at}">${esc(fmtCountdown(next.at))}</b><span class="args" style="font-family:var(--font-body);font-size:12.5px" title="${esc(next.reason)}">${esc(reasonBrief(next.reason))}</span></div>` : ""}`);
     }
 
@@ -730,7 +734,7 @@ VIEWS.activity = {
     patch(box, `<div class="transcript-head">
         <div class="transcript-title"><h2>Wake #${sel}</h2>${live ? '<span class="badge b-accent">executing</span>' : ""}<span class="muted">${esc(reasonBrief(wakeReason))}</span><span class="muted" style="margin-left:auto">${esc(fmtTime(summary?.stats?.startedAt ?? st?.wake?.startedAt ?? entries[0]?.ts))}</span></div>
         ${reasonParts(wakeReason).length > 1 ? `<div class="transcript-reasons">${reasonList(wakeReason, UI.transcriptReasonOpen, "transcript-reason", 4)}</div>` : ""}
-        ${summary ? `<div class="transcript-summary">${esc(summary.text)}</div>` : ""}
+        ${summary ? `<div class="transcript-summary">${wakeReportHtml(summary, esc)}</div>` : ""}
         <div class="statline">${summary ? wakeStatsTags(summary) : live ? `<span class="tag small">running <b data-elapsed="${st.wake.startedAt}">${esc(fmtDur(Date.now() - st.wake.startedAt))}</b></span><span class="tag small">round ${st.wake.round}</span>` : ""}
           <span class="tag small">${calls.length} calls</span>${calls.filter(c => c.outcome !== "ok").length ? `<span class="tag small"><b class="warn">${calls.filter(c => c.outcome !== "ok").length}</b> failed</span>` : ""}</div>
       </div>
