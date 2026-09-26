@@ -200,7 +200,7 @@ export function isContractOpen(c: Contract): boolean {
 /**
  * One line per ship for the live fleet table the loop appends after every
  * round: where each ship is, what it holds, and when it can act. Keeps the
- * agent from acting on ships still in flight after older results were trimmed.
+ * agent from acting on ships still in flight on the strength of older results.
  */
 export function fleetTable(
   ships: Ship[],

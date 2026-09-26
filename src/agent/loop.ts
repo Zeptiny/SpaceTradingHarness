@@ -26,7 +26,7 @@ import { routines, describeSpec } from "../state/routines.js";
 import { mapSystem } from "../state/collector.js";
 import { serverInfo } from "../state/universe.js";
 import { resale, type ResaleView } from "../state/resale.js";
-import type { WakeStats } from "../state/summaries.js";
+import { reportText, type WakeReport, type WakeStats } from "../state/summaries.js";
 import { annotateTimes, isoSec, stamp } from "../utils/time.js";
 import type { Agent, Ship } from "../generated/types.js";
 
@@ -43,7 +43,7 @@ How you work:
 - A ship IN_TRANSIT or on cooldown cannot act until the time its rejection names; don't retry before then. Use wait_for_next for short waits (it returns when the first busy ship is ready, with the market it arrived at), otherwise give other ships work or end_loop.
 - After each round of tool results you get a FLEET table: every ship's location, cargo, fuel, when it can act and its routine. Trust it over older results.
 - Identical reads within a wake are answered from cache for up to 30s, until you take an action or wait; after that, reads hit the API again.
-- When you finish, call end_loop with a summary for the human operator (up to 2000 characters).
+- When you finish, call end_loop with a report for the human operator: done (what you did and why), next (what happens next and why) and summary (the overall picture and anything else worth knowing). The next wake's working memory shows it in recentSummaries, so write next as a plan you can pick up.
 
 Let the harness do the repetition:
 - Routines (assign_routine) run a ship's loop without you: trade (buy at A, sell at B, repeat while the margin holds), mine (extract, dump what you don't keep, deliver contract goods, sell, repeat) and scout (probes cycle through markets to keep prices fresh). You are woken only when a routine stops, with the reason. Put every ship with a repeatable job on a routine and spend your turns on decisions: which routes, which ships to buy, when to move a ship to better work. A ship on a routine refuses your direct actions until cancel_routine.
@@ -289,7 +289,7 @@ async function buildWorkingMemory(reason: string): Promise<WorkingMemory> {
     },
     goals: memory.activeGoals(),
     notes: memory.recall(undefined, undefined, 8).map(n => ({ id: n.id, kind: n.kind, content: n.content, tags: n.tags })),
-    recentSummaries: summaries.recent(3).map(s => ({ wake: s.wake, text: s.text })),
+    recentSummaries: summaries.recent(3).map(s => (s.report ? { wake: s.wake, ...s.report } : { wake: s.wake, text: s.text })),
     limits: {
       maxActions: Math.max(config.agent.maxActionsPerWake, config.agent.actionsPerShip * (ships?.length ?? 0)),
       maxRounds: Math.max(config.agent.maxRoundsPerWake, config.agent.roundsPerShip * (ships?.length ?? 0)),
@@ -360,12 +360,9 @@ async function think(messages: ChatMessage[]): Promise<PlanResponse> {
   return { thought, reasoning: result.reasoning, calls, message, usage: result.usage };
 }
 
-// Tool results are compact projections (see state/projections.ts); the cap is
-// a backstop for unusually large payloads, not the normal path.
-const MAX_TOOL_RESULT_CHARS = 8_000;
+// Tool results are compact projections (see state/projections.ts) and reach
+// the agent whole; the round and action caps bound how much a wake collects.
 const READ_CACHE_TTL_MS = 30_000;
-const MAX_CONTEXT_CHARS = 150_000;
-const ELIDED = "[elided for context budget]";
 // Per-entry cap on reasoning kept in the activity log.
 const MAX_LOGGED_REASONING_CHARS = 24_000;
 
@@ -394,22 +391,7 @@ function toolMessageFor(callId: string, o: ExecOutcome): ChatMessage {
   const payload = o.outcome === "ok"
     ? { now, summary: o.summary, result: annotateTimes(o.result ?? null, nowMs) }
     : { now, outcome: o.outcome, summary: o.summary };
-  let content = JSON.stringify(payload);
-  if (content.length > MAX_TOOL_RESULT_CHARS) {
-    content = `${content.slice(0, MAX_TOOL_RESULT_CHARS)}…[truncated ${content.length - MAX_TOOL_RESULT_CHARS} chars — request narrower data]`;
-  }
-  return { role: "tool", tool_call_id: callId, content };
-}
-
-function elideOldToolResults(messages: ChatMessage[]): void {
-  let size = messages.reduce((n, m) => n + JSON.stringify(m).length, 0);
-  for (const m of messages) {
-    if (size <= MAX_CONTEXT_CHARS) return;
-    if (m.role !== "tool" || m.content === ELIDED) continue;
-    size -= JSON.stringify(m).length;
-    m.content = ELIDED;
-    size += JSON.stringify(m).length;
-  }
+  return { role: "tool", tool_call_id: callId, content: JSON.stringify(payload) };
 }
 
 function recordCachedOutcome(outcome: ExecOutcome, args: unknown): void {
@@ -476,7 +458,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
   const tokens = { prompt: 0, completion: 0, cached: 0 };
   let creditsStart: number | null = null;
   let endedBy: WakeStats["endedBy"] = "round-cap";
-  let agentSummary: string | null = null;
+  let report: WakeReport | null = null;
   let round = 0;
   const outcomes: ExecOutcome[] = [];
   let wakeId = 0;
@@ -559,8 +541,6 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
         }
         creditsStart = wm.agent?.credits ?? null;
         messages.push({ role: "user", content: `WORKING MEMORY:\n${JSON.stringify(wm, null, 1)}\n\nWhat's next?` });
-      } else {
-        elideOldToolResults(messages);
       }
       let response: PlanResponse | null = null;
       let lastLlmError = "";
@@ -642,8 +622,10 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
           }
           if (outcome.outcome === "ok" && outcome.tool === "end_loop") {
             ended = true;
-            const s = (call.args as { summary?: unknown } | undefined)?.summary;
-            if (typeof s === "string" && s.trim()) agentSummary = s.trim();
+            // end_loop only succeeds with all three fields filled in.
+            const a = (call.args ?? {}) as Record<string, unknown>;
+            const field = (k: keyof WakeReport) => (typeof a[k] === "string" ? String(a[k]).trim() : "");
+            report = { done: field("done"), next: field("next"), summary: field("summary") };
           }
         }
       };
@@ -676,7 +658,7 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
     }
 
     const details = summarizeWake(outcomes);
-    const text = agentSummary ?? (outcomes.length ? details : endedEarlyText(endedBy));
+    const text = report ? reportText(report) : outcomes.length ? details : endedEarlyText(endedBy);
     const stats: WakeStats = {
       startedAt,
       durationMs: Date.now() - startedAt,
@@ -690,7 +672,8 @@ export async function runWake(wakeup: Wakeup): Promise<void> {
     summaries.add({
       reason: wakeup.reason,
       text,
-      details: agentSummary ? details : undefined,
+      report: report ?? undefined,
+      details: report ? details : undefined,
       actions: outcomes.map(o => ({ tool: o.tool, outcome: o.outcome })),
       stats,
     });

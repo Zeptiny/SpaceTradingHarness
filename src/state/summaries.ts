@@ -12,12 +12,29 @@ export interface WakeStats {
   endedBy: "end_loop" | "no-tool-calls" | "round-cap" | "action-cap" | "llm-error" | "error" | "interrupted";
 }
 
+/** The agent's end_loop report. */
+export interface WakeReport {
+  /** What was done this wake and why. */
+  done: string;
+  /** What happens next and why. */
+  next: string;
+  /** Overall picture and anything else worth knowing. */
+  summary: string;
+}
+
+/** One text block for places that show a single string (lists, alerts). */
+export function reportText(r: WakeReport): string {
+  return `Done: ${r.done}\n\nNext: ${r.next}\n\nSummary: ${r.summary}`;
+}
+
 export interface LoopSummary {
   wake: number;
   ts: number;
   reason: string;
-  /** Agent-written summary (end_loop) when given, else the mechanical digest. */
+  /** Agent-written report (end_loop) as one text block when given, else the mechanical digest. */
   text: string;
+  /** The end_loop report, field by field (absent when the wake ended any other way). */
+  report?: WakeReport | undefined;
   /** Mechanical digest of tool outcomes. */
   details?: string | undefined;
   actions: { tool: string; outcome: string }[];
