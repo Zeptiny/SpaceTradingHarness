@@ -9,17 +9,39 @@ import { checkpointStore } from "../state/checkpoint.js";
 import { mirror, storeKeys, type FleetState } from "../state/store.js";
 import { runtime } from "../state/runtime.js";
 import { usage } from "../state/usage.js";
-import { prices } from "../state/prices.js";
+import { prices, type PricePoint } from "../state/prices.js";
 import { atlas } from "../state/atlas.js";
 import { galaxy, toRow } from "../state/galaxy.js";
+import { routines, describeSpec } from "../state/routines.js";
+import { earnings, type ShipEarnings } from "../state/earnings.js";
+import { shipyards } from "../state/shipyards.js";
 import { creditHistory } from "../state/credits.js";
 import { currentServer } from "../state/universe.js";
 import { toolCatalogJson } from "../tools/registry.js";
-import { compactMarket, compactShip, compactWaypoint, contractSummary } from "../state/projections.js";
+import { compactShip, compactWaypoint, contractSummary } from "../state/projections.js";
 import { config } from "../config.js";
-import type { Contract, Market, System, Waypoint } from "../generated/types.js";
+import type { Contract, Market, Shipyard, System, Waypoint } from "../generated/types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Per-ship earnings scan the whole event log, so /api/state (polled on every
+// flush) reuses a summary for a few seconds.
+let earningsCache: { at: number; key: string; rows: Map<string, ShipEarnings> } | null = null;
+function shipEarnings(ships: string[]): Map<string, ShipEarnings> {
+  const key = ships.join(",");
+  if (!earningsCache || earningsCache.key !== key || Date.now() - earningsCache.at > 10_000) {
+    earningsCache = { at: Date.now(), key, rows: new Map(earnings.summary(ships).map(e => [e.ship, e])) };
+  }
+  return earningsCache.rows;
+}
+
+/** Routine per ship for the panel: running ones, and stopped ones for an hour after they end. */
+function panelRoutines() {
+  const cutoff = Date.now() - 3600_000;
+  return routines.all()
+    .filter(r => r.status === "running" || r.updatedAt >= cutoff)
+    .map(r => ({ ship: r.ship, spec: r.spec, label: describeSpec(r.spec), status: r.status, phase: r.phase, trips: r.trips, profit: r.profit, startedAt: r.startedAt, updatedAt: r.updatedAt, endReason: r.endReason }));
+}
 
 export function startPanel(): void {
   const app = express();
@@ -88,9 +110,14 @@ export function startPanel(): void {
 
   app.get("/api/state", (_req, res) => {
     const fleet = mirror.get<FleetState>(storeKeys.fleet);
+    const earned = shipEarnings(fleet?.ships.map(s => s.symbol) ?? []);
     res.json({
       agent: mirror.get(storeKeys.agent) ?? null,
-      fleet: fleet?.ships.map(compactShip) ?? [],
+      fleet: fleet?.ships.map(s => {
+        const e = earned.get(s.symbol);
+        return { ...compactShip(s), earnings: e ? { lastHour: e.lastHour, last24h: e.last24h, total: e.total, perHour: e.perHour, boughtFor: e.boughtFor, paybackHours: e.paybackHours } : null };
+      }) ?? [],
+      routines: panelRoutines(),
       contracts: (mirror.get<Contract[]>(storeKeys.contracts) ?? []).map(contractSummary),
       rate: runtime.rate,
       scheduler: {
@@ -148,18 +175,53 @@ export function startPanel(): void {
     for (const entry of mirror.listPrefix<System>(storeKeys.system("").slice(0, -1))) {
       if (entry.key.includes(":") && !entry.key.startsWith("system-waypoints:")) systemsBySymbol.set(entry.value.symbol, entry.value);
     }
-    const waypointsBySystem = new Map<string, (ReturnType<typeof compactWaypoint> & { ships: string[] })[]>();
+    type PanelWaypoint = { symbol: string; [field: string]: unknown };
+    const waypointsBySystem = new Map<string, PanelWaypoint[]>();
     for (const entry of mirror.listPrefix<Waypoint[]>("system-waypoints:")) {
       const system = entry.key.split(":")[1] ?? "";
       waypointsBySystem.set(system, entry.value.map(w => ({ ...compactWaypoint(w), ships: shipAt.get(w.symbol) ?? [] })));
       if (!systemsBySymbol.has(system)) systemsBySymbol.set(system, { symbol: system });
     }
+    // The atlas also knows waypoints the collector scouted by trait (shipyards,
+    // markets) in systems whose full list was never read; show those too.
+    for (const sys of atlas.allSystems()) {
+      const known = atlas.inSystem(sys.symbol);
+      if (!known.length) continue;
+      const list = waypointsBySystem.get(sys.symbol) ?? [];
+      const have = new Set(list.map(w => w.symbol));
+      for (const w of known) {
+        if (!have.has(w.symbol)) list.push({ symbol: w.symbol, type: w.type, x: w.x, y: w.y, traits: w.traits, isUnderConstruction: w.underConstruction ?? false, ships: shipAt.get(w.symbol) ?? [] });
+      }
+      waypointsBySystem.set(sys.symbol, list);
+      if (!systemsBySymbol.has(sys.symbol)) systemsBySymbol.set(sys.symbol, { symbol: sys.symbol, x: sys.x, y: sys.y });
+    }
+
+    // Per-waypoint extras the harness remembers (panel only): live modifiers,
+    // jump gate construction, ship offers and what each shipyard builds.
+    const extras: Record<string, { modifiers?: string[]; modifiersAt?: number; construction?: unknown; shipyard?: unknown }> = {};
+    const extra = (sym: string) => (extras[sym] ??= {});
+    for (const list of waypointsBySystem.values()) {
+      for (const w of list) {
+        const known = atlas.get(w.symbol);
+        if (known?.modifiers?.length) Object.assign(extra(w.symbol), { modifiers: known.modifiers, modifiersAt: known.modifiersAt });
+        const c = atlas.construction(w.symbol);
+        if (c) extra(w.symbol).construction = c;
+      }
+    }
+    const offersAt = new Map<string, { type: string; price: number; supply: string; cargo?: number | undefined; speed?: number | undefined; ts: number }[]>();
+    for (const o of shipyards.all()) (offersAt.get(o.waypoint) ?? offersAt.set(o.waypoint, []).get(o.waypoint)!).push({ type: o.type, price: o.price, supply: o.supply, cargo: o.cargo, speed: o.speed, ts: o.ts });
+    for (const { value: y } of mirror.listPrefix<Shipyard>("shipyard:")) {
+      extra(y.symbol).shipyard = { types: (y.shipTypes ?? []).map(t => t.type), offers: (offersAt.get(y.symbol) ?? []).sort((a, b) => a.price - b.price) };
+      offersAt.delete(y.symbol);
+    }
+    for (const [wp, offers] of offersAt) extra(wp).shipyard = { types: offers.map(o => o.type), offers: offers.sort((a, b) => a.price - b.price) };
     res.json({
       galaxy: galaxy.status(),
       gateLinks: atlas.gateLinks(),
       intel: atlas.systemIntel(),
       systems: [...systemsBySymbol.values()].sort((a, b) => a.symbol.localeCompare(b.symbol)),
       waypointsBySystem: Object.fromEntries(waypointsBySystem),
+      extras,
       inTransit: (fleet?.ships ?? [])
         .filter(s => s.nav.status === "IN_TRANSIT")
         .map(s => ({ symbol: s.symbol, from: s.nav.route.origin.symbol, to: s.nav.route.destination.symbol, arrival: s.nav.route.arrival })),
@@ -179,9 +241,38 @@ export function startPanel(): void {
 
   // Latest snapshot per market (whatever the agent last fetched) — the
   // markets page derives spreads and trade opportunities from these.
+  // The panel keeps the API's purchasePrice/sellPrice names (the agent's
+  // compactMarket renames them youPay/youGet). A market read with no ship
+  // present lists no prices, so those fall back to the last prices the price
+  // store recorded there, marked with when they were seen.
   app.get("/api/markets", (_req, res) => {
-    const markets = mirror.listPrefix<Market>("market:").map(e => ({ ...compactMarket(e.value), fetchedAt: e.fetchedAt }));
-    res.json(markets.sort((a, b) => a.symbol.localeCompare(b.symbol)));
+    const lastSeen = new Map<string, PricePoint[]>();
+    for (const p of prices.latest()) (lastSeen.get(p.waypoint) ?? lastSeen.set(p.waypoint, []).get(p.waypoint)!).push(p);
+    const fromHistory = (points: PricePoint[]) => ({
+      tradeGoods: points
+        .map(p => ({ symbol: p.good, type: p.type ?? "EXCHANGE", supply: p.supply, activity: p.activity, purchasePrice: p.purchasePrice, sellPrice: p.sellPrice, tradeVolume: p.volume }))
+        .sort((a, b) => a.symbol.localeCompare(b.symbol)),
+      pricesAt: Math.max(...points.map(p => p.ts)),
+    });
+    const out = new Map<string, Record<string, unknown>>();
+    for (const { value: m, fetchedAt } of mirror.listPrefix<Market>("market:")) {
+      const base = { symbol: m.symbol, fetchedAt, exports: m.exports.map(g => g.symbol), imports: m.imports.map(g => g.symbol), exchange: m.exchange.map(g => g.symbol) };
+      if (m.tradeGoods?.length) {
+        out.set(m.symbol, {
+          ...base,
+          tradeGoods: m.tradeGoods.map(g => ({ symbol: g.symbol, type: g.type, supply: g.supply, activity: g.activity, purchasePrice: g.purchasePrice, sellPrice: g.sellPrice, tradeVolume: g.tradeVolume })),
+          pricesAt: fetchedAt,
+          live: true,
+        });
+      } else {
+        const seen = lastSeen.get(m.symbol);
+        out.set(m.symbol, seen?.length ? { ...base, ...fromHistory(seen) } : { ...base, note: "No prices seen yet: a ship has to be at this market to read them." });
+      }
+    }
+    for (const [wp, points] of lastSeen) {
+      if (!out.has(wp)) out.set(wp, { symbol: wp, fetchedAt: Math.max(...points.map(p => p.ts)), exports: [], imports: [], exchange: [], ...fromHistory(points) });
+    }
+    res.json([...out.values()].sort((a, b) => String(a.symbol).localeCompare(String(b.symbol))));
   });
 
   app.get("/api/credits", (req, res) => {

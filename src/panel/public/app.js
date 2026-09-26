@@ -136,8 +136,8 @@ const S = {
 const UI = {
   view: "overview", conn: "connecting", lastEventAt: 0,
   selWake: null, logQuery: "", logIssues: false, openCalls: new Set(),
-  fleetFilter: "", creditRange: 24, lbTab: "credits",
-  mapSystem: null, mapSel: null, mapView: null,
+  fleetFilter: "", creditRange: 24, lbTab: "credits", nowReasonOpen: false, nowReasonWake: null, transcriptReasonOpen: false, transcriptReasonWake: null,
+  mapSystem: null, mapSel: null, mapView: null, mapLevel: "galaxy", mapLevelChosen: false,
   galView: null, galSel: null, galHover: null,
   marketTab: "opps", marketSel: null, marketQuery: "",
   noteKind: "", noteQuery: "", toolQuery: "", openTools: new Set(),
@@ -383,10 +383,41 @@ function wakeStatsTags(w) {
   ].join("");
 }
 
+// Wake reasons: the scheduler joins every pending reason with "; ", so a wake
+// after a sweep of routine stops can carry a dozen long "SHIP routine stopped
+// (...)" lines. Show them as a short list with full system prefixes dropped.
+const shortSyms = s => String(s ?? "").replace(/\b[A-Z]\d+-[A-Z0-9]+-([A-Z0-9]+)\b/g, "$1");
+const reasonParts = reason => String(reason ?? "").split("; ").map(p => p.trim()).filter(Boolean);
+function reasonBrief(reason) {
+  const parts = reasonParts(reason);
+  return parts.length > 1 ? `${shortSyms(parts[0])} (+${parts.length - 1} more)` : shortSyms(parts[0] ?? "");
+}
+function reasonItem(text) {
+  const m = /^(\S+) routine stopped \((.+?)\): (.+)$/.exec(text);
+  if (m) return `<span class="mono">${esc(m[1])}</span> <span class="warn">stopped</span> <span class="dim">${esc(shortSyms(m[2]))}</span> · ${esc(shortSyms(m[3]))}`;
+  return esc(shortSyms(text));
+}
+function reasonList(reason, open, act, max = 3) {
+  const parts = reasonParts(reason);
+  const shown = open ? parts : parts.slice(0, max);
+  return `<ul class="reason-list">${shown.map(p => `<li title="${esc(p)}">${reasonItem(p)}</li>`).join("")}</ul>${parts.length > max
+    ? `<button class="btn btn-sm btn-ghost reason-more" data-act="${act}">${open ? "show less" : `+${parts.length - max} more`}</button>` : ""}`;
+}
+/** The routine record the panel has for a ship (running, or stopped within the last hour). */
+const routineOf = sym => (S.state?.routines ?? []).find(r => r.ship === sym) ?? null;
+function routineBrief(r) {
+  if (!r) return "";
+  const sp = r.spec ?? {};
+  const what = sp.kind === "trade" ? `trade ${sp.good} ${wpShort(sp.buyAt)} → ${wpShort(sp.sellAt)}`
+    : sp.kind === "mine" ? `mine ${wpShort(sp.asteroid)}${sp.sellAt ? ` → ${wpShort(sp.sellAt)}` : ""}`
+    : sp.kind === "goto" ? `goto ${wpShort(sp.destination)}` : sp.kind === "scout" ? "scout markets" : shortSyms(r.label);
+  return what;
+}
+
 // ================================================================ chrome
 
 const NAV = [
-  ["overview", "Overview"], ["fleet", "Fleet"], ["activity", "Activity"], ["galaxy", "Galaxy"], ["map", "System"],
+  ["overview", "Overview"], ["fleet", "Fleet"], ["activity", "Activity"], ["map", "Map"],
   ["markets", "Markets"], ["contracts", "Contracts"], ["memory", "Memory"], ["agent", "Agent"],
 ];
 
@@ -418,13 +449,13 @@ function renderChrome() {
   else if (st.wake) {
     mode = "running";
     head = `Executing · wake #${st.wake.id}`;
-    sub = `round ${st.wake.round} · ${esc(st.wake.reason)} · <span data-elapsed="${st.wake.startedAt}">${esc(fmtDur(Date.now() - st.wake.startedAt))}</span>`;
+    sub = `round ${st.wake.round} · ${esc(reasonBrief(st.wake.reason))} · <span data-elapsed="${st.wake.startedAt}">${esc(fmtDur(Date.now() - st.wake.startedAt))}</span>`;
   } else if (st.scheduler.paused) {
     mode = "paused"; head = "Paused";
     sub = `agent will not wake until resumed · ${st.scheduler.pending.length} wakeup(s) held`;
   } else {
     const next = st.scheduler.pending[0];
-    sub = next ? `next wake <b data-cd="${next.at}">${esc(fmtCountdown(next.at))}</b> · ${esc(next.reason)}` : "no wakeups scheduled";
+    sub = next ? `next wake <b data-cd="${next.at}">${esc(fmtCountdown(next.at))}</b> · ${esc(reasonBrief(next.reason))}` : "no wakeups scheduled";
   }
   strip.dataset.mode = mode;
   $("#statusTitle").textContent = head;
@@ -469,6 +500,7 @@ const head = (t, desc, tools = "") => `<div class="view-head"><div><h1 class="vi
 const VIEWS = {};
 
 // ---------------------------------------------------------------- overview
+const NOW_CALLS = 12; // tool calls the Agent · now card lists; the transcript has the rest
 VIEWS.overview = {
   needs: ["credits", "activity"],
   mount() {
@@ -480,7 +512,7 @@ VIEWS.overview = {
         <section class="panel span-3 tile" id="tLlm"></section>
         ${panel("Credits", '<div id="creditHero"></div><div class="chart" id="creditChart"></div>', { cls: "span-8", aside: '<div class="chips" id="rangeChips"></div>' })}
         ${panel("Agent · now", '<div class="now-card" id="nowBody"></div>', { cls: "span-4", aside: '<span id="nowAside"></span>' })}
-        ${panel("Fleet", '<div class="table-wrap" id="miniFleet"></div>', { cls: "span-8", bodyCls: "panel-body flush", aside: '<a href="#/fleet">all ships →</a>' })}
+        ${panel("Fleet", '<div class="table-wrap fleet-scroll" id="miniFleet"></div>', { cls: "span-8", bodyCls: "panel-body flush", aside: '<a href="#/fleet">all ships →</a>' })}
         ${panel("Alerts", '<div class="alerts" id="alertList"></div>', { cls: "span-4" })}
         ${panel("Recent wakes", '<div class="wake-list" id="wakeList"></div>', { cls: "span-8", bodyCls: "panel-body flush", aside: '<a href="#/activity">full log →</a>' })}
         ${panel("Leaderboard", '<div id="leaderboard"></div>', { cls: "span-4", bodyCls: "panel-body flush", aside: '<div class="chips" id="lbChips"></div>' })}
@@ -531,30 +563,38 @@ VIEWS.overview = {
       const wakeEntries = S.activity.filter(e => e.wake === st.wake.id);
       const lastThought = [...wakeEntries].reverse().find(e => e.kind === "thought" && e.text);
       const after = lastThought ? wakeEntries.filter(e => e.kind === "tool" && e.id > lastThought.id) : [];
+      const shown = after.slice(-NOW_CALLS);
+      if (UI.nowReasonWake !== st.wake.id) { UI.nowReasonWake = st.wake.id; UI.nowReasonOpen = false; }
+      const nReasons = reasonParts(st.wake.reason).length;
       patch($("#nowAside"), `<span class="badge b-accent">round ${st.wake.round}</span>`);
-      patch(nowBody, `<div class="muted" style="font-size:12px">wake #${st.wake.id} · ${esc(st.wake.reason)}</div>
+      patch(nowBody, `<div class="now-reason"><div class="muted" style="font-size:12px">wake #${st.wake.id}${nReasons > 1 ? ` · ${nReasons} reasons` : ""}</div>${reasonList(st.wake.reason, UI.nowReasonOpen, "now-reason")}</div>
         <p class="thought live">${esc(lastThought?.text ?? "Reading working memory…")}</p>
-        <div class="calls">${after.map(e => `<div class="call-line"><span class="ev-dot" style="position:static;box-shadow:none;background:var(--${outcomeClass(e.outcome) === "ok" ? "good" : outcomeClass(e.outcome) === "rejected" ? "warn" : "bad"});width:7px;height:7px;flex:none;border-radius:50%"></span><span class="mono">${esc(e.tool)}</span><span class="args">${esc(e.summary ?? argsBrief(e.args))}</span></div>`).join("")}</div>
+        ${after.length > shown.length ? `<div class="muted" style="font-size:12px">${after.length - shown.length} earlier call${after.length - shown.length === 1 ? "" : "s"} in the transcript</div>` : ""}
+        <div class="calls">${shown.map(e => `<div class="call-line"><span class="ev-dot" style="position:static;box-shadow:none;background:var(--${outcomeClass(e.outcome) === "ok" ? "good" : outcomeClass(e.outcome) === "rejected" ? "warn" : "bad"});width:7px;height:7px;flex:none;border-radius:50%"></span><span class="mono">${esc(e.tool)}</span><span class="args">${esc(e.summary ?? argsBrief(e.args))}</span></div>`).join("")}</div>
         <a href="#/activity/${st.wake.id}" style="font-size:12.5px">follow the transcript →</a>`);
     } else {
       const w = S.wakes[0];
       const next = st.scheduler.pending[0];
       patch($("#nowAside"), st.scheduler.paused ? '<span class="badge b-warn">paused</span>' : '<span class="badge b-good">standing by</span>');
       patch(nowBody, `${w ? `<div class="muted" style="font-size:12px">last wake #${w.wake} · <span data-ago="${w.ts}">${esc(fmtAgo(w.ts))}</span></div><p class="thought">${esc(w.text)}</p><div class="statline">${wakeStatsTags(w)}</div>` : empty("No wakes yet.")}
-        ${next ? `<div class="call-line" style="margin-top:4px"><span class="muted">next</span><b class="mono" data-cd="${next.at}">${esc(fmtCountdown(next.at))}</b><span class="args" style="font-family:var(--font-body);font-size:12.5px">${esc(next.reason)}</span></div>` : ""}`);
+        ${next ? `<div class="call-line" style="margin-top:4px"><span class="muted">next</span><b class="mono" data-cd="${next.at}">${esc(fmtCountdown(next.at))}</b><span class="args" style="font-family:var(--font-body);font-size:12.5px" title="${esc(next.reason)}">${esc(reasonBrief(next.reason))}</span></div>` : ""}`);
     }
 
     // mini fleet
-    patch($("#miniFleet"), fl.length ? `<table class="table mini-fleet"><thead><tr><th>Ship</th><th>Status</th><th>Where</th><th>Fuel</th><th>Cargo</th><th class="r">Next</th></tr></thead><tbody>${fl.map(s => {
+    patch($("#miniFleet"), fl.length ? `<table class="table mini-fleet"><thead><tr><th>Ship</th><th>Status</th><th>Where</th><th>Job</th><th>Fuel</th><th>Cargo</th><th class="r">Earned 1h</th><th class="r">Next</th></tr></thead><tbody>${fl.map(s => {
       const t = s.nav?.route;
       const where = t ? `<span class="mono">${esc(wpShort(t.from))} → ${esc(wpShort(t.to))}</span>` : `<span class="mono">${esc(wpShort(s.nav?.waypoint))}</span>`;
       const cdAt = s.cooldown?.expiration ? parseTs(s.cooldown.expiration) : NaN;
       const nxt = t && !arrivedStale(s) ? `<span class="mono" data-cd="${parseTs(t.arrival)}">${esc(fmtCountdown(parseTs(t.arrival)))}</span>`
         : cdAt > Date.now() ? `<span class="mono muted">cooldown <span data-cd="${cdAt}" data-ready="ready">${esc(fmtCountdown(cdAt))}</span></span>` : '<span class="muted">—</span>';
       const fuelPct = s.fuel?.capacity ? (s.fuel.current / s.fuel.capacity) * 100 : null;
-      return `<tr class="clickable" data-act="goto" data-href="#/fleet"><td>${esc(s.symbol)}<div class="muted" style="font-size:11px">${esc(title(s.role))}</div></td><td>${statusBadge(s.nav?.status)}</td><td>${where}</td>
+      const r = routineOf(s.symbol);
+      const job = r ? `<span class="job ${r.status === "running" ? "" : "stopped"}" title="${esc(`${r.label} · ${r.status === "running" ? r.phase : r.endReason ?? r.status}`)}">${esc(routineBrief(r))}</span><div class="muted job-sub">${r.status === "running" ? esc(shortSyms(r.phase)) : `<span class="warn">stopped</span> <span data-ago="${r.updatedAt}">${esc(fmtAgo(r.updatedAt))}</span>`}</div>` : '<span class="muted">agent-driven</span>';
+      const e1 = s.earnings?.lastHour;
+      return `<tr class="clickable" data-act="goto" data-href="#/fleet"><td>${esc(s.symbol)}<div class="muted" style="font-size:11px">${esc(title(s.role))}</div></td><td>${statusBadge(s.nav?.status)}</td><td>${where}</td><td class="job-cell">${job}</td>
         <td class="num ${fuelPct != null && fuelPct < 20 ? "warn" : ""}">${fuelPct == null ? '<span class="muted">—</span>' : `${Math.round(fuelPct)}%`}</td>
-        <td class="num">${s.cargo?.capacity ? `${s.cargo.units}/${s.cargo.capacity}` : '<span class="muted">—</span>'}</td><td class="r">${nxt}</td></tr>`;
+        <td class="num">${s.cargo?.capacity ? `${s.cargo.units}/${s.cargo.capacity}` : '<span class="muted">—</span>'}</td>
+        <td class="r num ${e1 > 0 ? "good" : e1 < 0 ? "bad" : "muted"}">${isNum(e1) && e1 !== 0 ? esc(fmtSigned(e1)) : "—"}</td><td class="r">${nxt}</td></tr>`;
     }).join("")}</tbody></table>` : empty("No ships cached yet.", "The fleet appears after the agent's first wake."));
 
     // alerts
@@ -569,7 +609,7 @@ VIEWS.overview = {
       const delta = wakeDelta(w);
       const iss = issuesOf(w);
       return `<a class="wake-row" href="#/activity/${w.wake}"><div class="wake-id">#${w.wake}<small>${esc(fmtTime(w.ts))}</small></div>
-        <div style="min-width:0"><div class="wake-text">${esc(w.text)}</div><div class="wake-reason">${esc(w.reason)}</div></div>
+        <div style="min-width:0"><div class="wake-text">${esc(w.text)}</div><div class="wake-reason" title="${esc(w.reason)}">${esc(reasonBrief(w.reason))}</div></div>
         <div class="wake-stats">${delta ? `<span class="${delta > 0 ? "good" : "bad"}">${esc(fmtSigned(delta))} cr</span>` : ""}<span>${esc(fmtDur(w.stats?.durationMs))}${w.stats ? ` · ${w.stats.requests} req` : ""}</span>${iss ? `<span class="warn">${iss} failed</span>` : ""}</div></a>`;
     }).join("") || empty("No wakes yet."));
   },
@@ -626,9 +666,14 @@ VIEWS.fleet = {
         : `<div class="ship-loc">at <span class="wp">${esc(s.nav?.waypoint)}</span><span class="muted">· ${esc(title(s.nav?.flightMode))}</span></div>`;
       const cd = s.cooldown?.expiration ? parseTs(s.cooldown.expiration) : null;
       const last = lastShipAction(s.symbol);
+      const rt = routineOf(s.symbol);
+      const en = s.earnings;
+      const job = rt ? `<div class="ship-job ${rt.status === "running" ? "" : "stopped"}"><span class="mono" title="${esc(rt.label)}">${esc(routineBrief(rt))}</span>
+          <span class="muted">${rt.status === "running" ? `${esc(shortSyms(rt.phase))} · ${esc(rt.trips)} trip${rt.trips === 1 ? "" : "s"}${rt.profit ? ` · <span class="${rt.profit > 0 ? "good" : "bad"}">${esc(fmtSigned(rt.profit))}</span>` : ""}` : `<span class="warn">stopped</span> <span data-ago="${rt.updatedAt}">${esc(fmtAgo(rt.updatedAt))}</span>${rt.endReason ? ` · <span title="${esc(rt.endReason)}">${esc(shortSyms(rt.endReason))}</span>` : ""}`}</span></div>` : "";
+      const earn = en && (en.total || en.boughtFor) ? `<div class="ship-earn"><span>1h <b class="${en.lastHour > 0 ? "good" : en.lastHour < 0 ? "bad" : ""}">${esc(fmtSigned(en.lastHour))}</b></span><span>24h <b class="${en.last24h > 0 ? "good" : en.last24h < 0 ? "bad" : ""}">${esc(fmtSigned(en.last24h))}</b></span>${isNum(en.perHour) ? `<span>${esc(fmtCompact(en.perHour))}/h avg</span>` : ""}${isNum(en.paybackHours) ? `<span title="purchase price ${esc(fmtInt(en.boughtFor))}">pays back in ${esc(fmtDur(en.paybackHours * 3600_000))}</span>` : ""}</div>` : "";
       return `<article class="panel ship">
         <div class="ship-head"><div><div class="ship-name">${esc(s.symbol)}</div><div class="ship-role">${esc(title(s.role))} · ${esc(title(String(s.frame ?? "").replace("FRAME_", "")))}${s.speed ? ` · speed ${esc(s.speed)}` : ""}</div></div>${statusBadge(s.nav?.status)}</div>
-        ${loc}
+        ${loc}${job}${earn}
         <div class="ship-gauges">${gauge("Fuel", s.fuel?.current ?? 0, s.fuel?.capacity ?? 0, "fuel")}${gauge("Cargo", s.cargo?.units ?? 0, s.cargo?.capacity ?? 0)}
           ${cd && cd > Date.now() ? `<div class="gauge"><span class="gauge-label">Cooldown</span><span class="dim" style="font-size:12px">reactor recharging</span><span class="gauge-num" data-cd="${cd}" data-ready="ready">${esc(fmtCountdown(cd))}</span></div>` : ""}</div>
         ${s.cargo?.inventory?.length ? `<div class="inv">${s.cargo.inventory.map(i => `<span class="tag">${esc(i.symbol)} <b>${esc(i.units)}</b></span>`).join("")}</div>` : ""}
@@ -654,7 +699,7 @@ VIEWS.activity = {
     const st = S.state;
     const sel = selectedWakeId();
     const picks = [];
-    if (st?.wake && !S.wakes.some(w => w.wake === st.wake.id)) picks.push({ wake: st.wake.id, ts: st.wake.startedAt, text: st.wake.reason, live: true });
+    if (st?.wake && !S.wakes.some(w => w.wake === st.wake.id)) picks.push({ wake: st.wake.id, ts: st.wake.startedAt, text: reasonBrief(st.wake.reason), live: true });
     picks.push(...S.wakes);
     patch($("#followBtn"), UI.selWake ? '<button class="btn btn-sm btn-ghost" data-act="follow">Follow latest</button>' : '<span class="muted">following latest</span>');
     $("#issuesBtn").setAttribute("aria-pressed", String(UI.logIssues));
@@ -670,6 +715,8 @@ VIEWS.activity = {
     if (!sel) { patch(box, empty("Nothing to show yet.", "Transcripts appear once the agent wakes.")); return; }
     const summary = S.wakes.find(w => w.wake === sel);
     const live = st?.wake?.id === sel;
+    const wakeReason = summary?.reason ?? st?.wake?.reason ?? "";
+    if (UI.transcriptReasonWake !== sel) { UI.transcriptReasonWake = sel; UI.transcriptReasonOpen = false; }
     const entries = S.wakeLog.get(sel) ?? [];
     const q = UI.logQuery.trim().toLowerCase();
     const shown = entries.filter(e => {
@@ -681,7 +728,8 @@ VIEWS.activity = {
     });
     const calls = entries.filter(e => e.kind === "tool");
     patch(box, `<div class="transcript-head">
-        <div class="transcript-title"><h2>Wake #${sel}</h2>${live ? '<span class="badge b-accent">executing</span>' : ""}<span class="muted">${esc(summary?.reason ?? st?.wake?.reason ?? "")}</span><span class="muted" style="margin-left:auto">${esc(fmtTime(summary?.stats?.startedAt ?? st?.wake?.startedAt ?? entries[0]?.ts))}</span></div>
+        <div class="transcript-title"><h2>Wake #${sel}</h2>${live ? '<span class="badge b-accent">executing</span>' : ""}<span class="muted">${esc(reasonBrief(wakeReason))}</span><span class="muted" style="margin-left:auto">${esc(fmtTime(summary?.stats?.startedAt ?? st?.wake?.startedAt ?? entries[0]?.ts))}</span></div>
+        ${reasonParts(wakeReason).length > 1 ? `<div class="transcript-reasons">${reasonList(wakeReason, UI.transcriptReasonOpen, "transcript-reason", 4)}</div>` : ""}
         ${summary ? `<div class="transcript-summary">${esc(summary.text)}</div>` : ""}
         <div class="statline">${summary ? wakeStatsTags(summary) : live ? `<span class="tag small">running <b data-elapsed="${st.wake.startedAt}">${esc(fmtDur(Date.now() - st.wake.startedAt))}</b></span><span class="tag small">round ${st.wake.round}</span>` : ""}
           <span class="tag small">${calls.length} calls</span>${calls.filter(c => c.outcome !== "ok").length ? `<span class="tag small"><b class="warn">${calls.filter(c => c.outcome !== "ok").length}</b> failed</span>` : ""}</div>
@@ -746,31 +794,103 @@ function glyph(style, k, x = 0, y = 0) {
   }
 }
 
+// One map, two zoom levels: the galaxy star field (canvas) and a system's
+// waypoints (SVG). Scrolling in on a system at full galaxy zoom, double-
+// clicking it, or "Open system" drills into its map in place; scrolling out
+// past a system map's widest zoom (or the Galaxy crumb) returns to the stars.
 VIEWS.map = {
-  needs: ["universe", "markets"],
+  needs: ["universe", "markets", "galaxy"],
   mount() {
-    view().innerHTML = head("System map", "Waypoints by type, markets ringed in amber, ships live. Drag to pan, scroll to zoom.", '<select class="field" id="sysSelect"></select>') +
-      `<div class="map-layout mount"><section class="panel map-stage" id="mapStage"><svg id="mapSvg" role="img" aria-label="System map"></svg>
-        <div class="empty" id="mapEmpty" hidden style="position:absolute;inset:40% 0 auto">No waypoints cached for this system yet.<br><span class="muted">They appear as the agent reads waypoints and markets.</span></div>
-        <div class="map-hud"><button class="btn btn-sm" data-act="map-reset">Reset view</button></div><div class="map-legend" id="mapLegend"></div></section>
+    view().innerHTML = head("Map", "Scroll in on a system (or double-click it) to open its waypoints; scroll out to return to the galaxy.",
+      '<input class="field" id="galSearch" placeholder="Find system…" autocomplete="off" spellcheck="false" style="width:170px"><select class="field" id="sysSelect" title="Open a system whose waypoints are cached"></select>') +
+      `<div class="map-layout mount"><section class="panel map-stage" id="mapStage" data-level="${UI.mapLevel}">
+        <canvas id="galCanvas" role="img" aria-label="Galaxy map"></canvas>
+        <svg id="mapSvg" role="img" aria-label="System map"></svg>
+        <div class="empty map-empty" id="galEmpty" hidden></div>
+        <div class="empty map-empty" id="mapEmpty" hidden></div>
+        <nav class="map-crumbs" id="mapCrumbs" aria-label="Map level"></nav>
+        <div class="map-hud" id="mapHud"></div><div class="map-legend" id="mapLegend"></div><div class="gal-status" id="galStatus"></div></section>
         <section class="panel" id="mapDetail"></section></div>`;
-    $("#sysSelect").addEventListener("change", e => { UI.mapSystem = e.target.value; UI.mapView = null; UI.mapSel = null; this.update(); });
+    $("#galSearch").addEventListener("keydown", e => {
+      if (e.key !== "Enter") return;
+      const q = e.target.value.trim().toUpperCase();
+      if (!q) return;
+      const { rows } = galaxyModel();
+      const known = [...(S.universe?.systems ?? []).map(x => x.symbol), ...rows.map(r => r[0])];
+      const hit = known.find(x => x === q) ?? known.find(x => x.endsWith(`-${q}`)) ?? known.find(x => x.includes(q));
+      if (!hit) { toast(`No system matches ${q}`, true); return; }
+      if (galaxyModel().bySym.has(hit)) { mapLeave(hit); galSelect(hit, true); } else mapEnter(hit);
+    });
+    $("#sysSelect").addEventListener("change", e => { if (e.target.value) mapEnter(e.target.value); });
     bindMapInteractions();
-    $("#mapLegend").innerHTML = [["PLANET", "planet"], ["GAS_GIANT", "gas giant"], ["MOON", "moon"], ["ORBITAL_STATION", "station"], ["ASTEROID", "asteroid"], ["JUMP_GATE", "jump gate"], ["FUEL_STATION", "fuel"]]
-      .map(([t, l]) => `<span><svg viewBox="-8 -8 16 16">${glyph(wpStyle(t), 0.8)}</svg>${l}</span>`).join("");
+    bindGalaxyInteractions();
   },
   update() {
-    const u = S.universe;
-    const sel = $("#sysSelect");
-    const systems = u?.systems ?? [];
-    if (!UI.mapSystem) UI.mapSystem = ships()[0]?.nav?.system ?? systems[0]?.symbol ?? null;
-    const listed = UI.mapSystem && !systems.some(s => s.symbol === UI.mapSystem) ? [...systems, { symbol: UI.mapSystem }] : systems;
-    patch(sel, listed.map(s => `<option ${s.symbol === UI.mapSystem ? "selected" : ""}>${esc(s.symbol)}</option>`).join("") || "<option>no systems cached</option>");
-    if (UI.mapSystem && sel.value !== UI.mapSystem) sel.value = UI.mapSystem;
-    renderMap();
-    renderMapDetail();
+    const systems = S.universe?.systems ?? [];
+    if (!UI.mapSystem) UI.mapSystem = homeSystem() ?? systems[0]?.symbol ?? null;
+    if (!UI.mapLevelChosen && S.galaxy) {
+      // first open: the galaxy framed on the fleet when the star list is there, else the fleet's system
+      UI.mapLevelChosen = true;
+      if (!galaxyModel().rows.length) UI.mapLevel = "system";
+    }
+    const stage = $("#mapStage");
+    if (stage.dataset.level !== UI.mapLevel) stage.dataset.level = UI.mapLevel;
+    const cached = systems.filter(x => S.universe?.waypointsBySystem?.[x.symbol]?.length);
+    patch($("#sysSelect"), `<option value="">Open system…</option>${cached.map(x => `<option value="${esc(x.symbol)}">${esc(x.symbol)}${fleetCount(x.symbol) ? ` · ${fleetCount(x.symbol)} ships` : ""}</option>`).join("")}`);
+    $("#sysSelect").value = "";
+    renderMapChrome();
+    if (UI.mapLevel === "galaxy" && !UI.galView && galaxyModel().rows.length) galFleetView(); // opens framed on the fleet
+    if (UI.mapLevel === "galaxy") { drawGalaxy(); renderGalaxyDetail(); }
+    else { renderMap(); renderMapDetail(); }
   },
 };
+
+/** The system holding most of the fleet (or HQ's system). */
+function homeSystem() {
+  const n = new Map();
+  for (const s of ships()) { const sys = s.nav?.system ?? sysOf(s.nav?.waypoint); if (sys) n.set(sys, (n.get(sys) ?? 0) + 1); }
+  const top = [...n].sort((a, b) => b[1] - a[1])[0]?.[0];
+  return top ?? (S.state?.agent?.headquarters ? sysOf(S.state.agent.headquarters) : null);
+}
+const fleetCount = sys => ships().filter(s => (s.nav?.system ?? sysOf(s.nav?.waypoint)) === sys).length;
+
+function renderMapChrome() {
+  const sys = UI.mapLevel === "system";
+  patch($("#mapCrumbs"), sys
+    ? `<a href="#/map" data-act="map-leave">Galaxy</a><span class="sep">›</span><b class="mono">${esc(UI.mapSystem ?? "")}</b>`
+    : `<b>Galaxy</b>${UI.mapSystem ? `<span class="sep">›</span><a href="#/map" class="mono" data-act="map-enter" data-sys="${esc(UI.mapSystem)}">${esc(UI.mapSystem)}</a>` : ""}`);
+  patch($("#mapHud"), sys
+    ? '<button class="btn btn-sm" data-act="map-leave">← Galaxy</button><button class="btn btn-sm" data-act="map-reset">Reset view</button>'
+    : '<button class="btn btn-sm" data-act="gal-fit">Whole galaxy</button><button class="btn btn-sm" data-act="gal-fleet">Fleet</button><button class="btn btn-sm" data-act="gal-zoom" data-f="1.6" aria-label="Zoom in">+</button><button class="btn btn-sm" data-act="gal-zoom" data-f="0.625" aria-label="Zoom out">−</button>');
+  patch($("#mapLegend"), sys
+    ? [["PLANET", "planet"], ["GAS_GIANT", "gas giant"], ["MOON", "moon"], ["ORBITAL_STATION", "station"], ["ASTEROID", "asteroid"], ["JUMP_GATE", "jump gate"], ["FUEL_STATION", "fuel"]]
+      .map(([t, l]) => `<span><svg viewBox="-8 -8 16 16">${glyph(wpStyle(t), 0.8)}</svg>${l}</span>`).join("") +
+      '<span><i class="star-dot ring" style="border-color:var(--accent)"></i>market</span><span><i class="star-dot ring" style="border-color:var(--cyan)"></i>shipyard</span><span><i class="star-line dashed"></i>routine route</span><span><i class="star-dot" style="background:var(--bad)"></i>stripped / unstable</span>'
+    : Object.entries(STAR).map(([, st]) => `<span><i class="star-dot" style="background:${st.color}"></i>${st.label}</span>`).join("") +
+      `<span><i class="star-dot ring" style="border-color:${GAL_COLORS.fleet}"></i>fleet</span><span><i class="star-dot ring" style="border-color:${GAL_COLORS.known}"></i>read by harness</span><span><i class="star-line" style="background:${GAL_COLORS.gate}"></i>jump link</span>`);
+}
+
+/** Drill into a system's map in place. */
+function mapEnter(sym) {
+  if (!sym) return;
+  UI.mapSystem = sym; UI.mapView = null; UI.mapSel = null; UI.mapLevel = "system"; UI.galSel = sym;
+  if (UI.view !== "map") { location.hash = "#/map"; return; }
+  const stage = $("#mapStage");
+  stage.dataset.level = "system";
+  stage.classList.remove("zoom-out"); void stage.offsetWidth; stage.classList.add("zoom-in");
+  VIEWS.map.update();
+}
+
+/** Back out to the galaxy, framed around the system we were in. */
+function mapLeave(sym = UI.mapSystem) {
+  UI.mapLevel = "galaxy";
+  const stage = $("#mapStage");
+  if (stage) { stage.dataset.level = "galaxy"; stage.classList.remove("zoom-in"); void stage.offsetWidth; stage.classList.add("zoom-out"); }
+  const row = sym && galaxyModel().bySym.get(sym);
+  const v = galEnsureView();
+  if (row && v) { UI.galSel = sym; v.cx = row[1]; v.cy = -row[2]; v.scale = Math.min(v.max, Math.max(v.scale, v.max * 0.35)); }
+  VIEWS.map.update();
+}
 
 function mapModel() {
   const wps = S.universe?.waypointsBySystem?.[UI.mapSystem] ?? [];
@@ -783,10 +903,12 @@ function mapModel() {
 
 function renderMap() {
   const svg = $("#mapSvg");
-  if (!svg) return;
+  if (!svg || UI.mapLevel !== "system") return;
   const { wps, bySym, parents, children } = mapModel();
-  $("#mapEmpty").hidden = wps.length > 0;
+  const emptyEl = $("#mapEmpty");
+  emptyEl.hidden = wps.length > 0;
   if (!wps.length) {
+    patch(emptyEl, `No waypoints cached for ${esc(UI.mapSystem ?? "this system")} yet.<br><span class="muted">They appear once a ship or the background collector reads them. Scroll out to return to the galaxy.</span>`);
     patch(svg, "");
     return;
   }
@@ -811,10 +933,16 @@ function renderMap() {
   for (let r = step; r <= maxR; r += step) rings += `<circle class="ring-guide" cx="0" cy="0" r="${r}"/><text class="ring-label" x="${r + 3 * k}" y="${-3 * k}" style="font-size:${9 * k}px">${esc(fmtInt(r))}</text>`;
 
   const marketSet = new Set(S.markets.map(m => m.symbol));
+  for (const w of wps) if (w.traits?.includes("MARKETPLACE")) marketSet.add(w.symbol);
+  const extras = S.universe?.extras ?? {};
+  const isYard = w => w.traits?.includes("SHIPYARD") || !!extras[w.symbol]?.shipyard;
+  const depleted = w => (extras[w.symbol]?.modifiers ?? w.modifiers ?? []).some(m => ["STRIPPED", "UNSTABLE", "CRITICAL_LIMIT"].includes(m));
   const fl = ships();
   const atWp = new Map();
   for (const s of fl) if (s.nav?.status !== "IN_TRANSIT" || arrivedStale(s)) (atWp.get(s.nav?.waypoint) ?? atWp.set(s.nav?.waypoint, []).get(s.nav?.waypoint)).push(s);
 
+  const marks = (w, x, y, r) => `${marketSet.has(w.symbol) ? `<circle class="mk-market" cx="${x}" cy="${y}" r="${r + 3 * k}"/>` : ""}${isYard(w) ? `<circle class="mk-yard" cx="${x}" cy="${y}" r="${r + 6 * k}"/>` : ""}${w.isUnderConstruction ? `<circle class="mk-build" cx="${x}" cy="${y}" r="${r + 9 * k}"/>` : ""}${depleted(w) ? `<circle class="mk-depleted" cx="${x + r * 0.9}" cy="${y - r * 0.9}" r="${2.6 * k}"/>` : ""}`;
+  const tip = w => `${esc(w.symbol)} · ${esc(title(w.type))}${w.traits?.length ? ` · ${esc(w.traits.map(title).join(", "))}` : ""}${(extras[w.symbol]?.modifiers ?? []).length ? ` · ${esc(extras[w.symbol].modifiers.map(title).join(", "))}` : ""}`;
   const pos = new Map();
   let bodies = "";
   for (const p of parents) {
@@ -822,71 +950,137 @@ function renderMap() {
     pos.set(p.symbol, [px, py]);
     const st = wpStyle(p.type);
     const kids = children.get(p.symbol) ?? [];
-    const orbitR = (st.r + 9) * k;
+    const orbitR = (st.r + 12) * k;
     let kidsSvg = "";
     kids.forEach((c, i) => {
       const a = -Math.PI / 2 + (i * 2 * Math.PI) / kids.length;
       const cx = px + Math.cos(a) * orbitR, cy = py + Math.sin(a) * orbitR;
       pos.set(c.symbol, [cx, cy]);
-      kidsSvg += `<g class="wp-g${UI.mapSel === c.symbol ? " sel" : ""}" data-act="select-wp" data-wp="${esc(c.symbol)}"><title>${esc(c.symbol)} · ${esc(title(c.type))}${c.traits?.length ? ` · ${esc(c.traits.map(title).join(", "))}` : ""}</title>
-        ${marketSet.has(c.symbol) ? `<circle class="mk-market" cx="${cx}" cy="${cy}" r="${(wpStyle(c.type).r + 3) * k}"/>` : ""}${glyph(wpStyle(c.type), k, cx, cy)}
+      kidsSvg += `<g class="wp-g${UI.mapSel === c.symbol ? " sel" : ""}" data-act="select-wp" data-wp="${esc(c.symbol)}"><title>${tip(c)}</title>
+        ${marks(c, cx, cy, wpStyle(c.type).r * k)}${glyph(wpStyle(c.type), k, cx, cy)}
         <circle cx="${cx}" cy="${cy}" r="${9 * k}" fill="transparent"/>${UI.mapSel === c.symbol ? `<text class="lbl" x="${cx}" y="${cy - 9 * k}" text-anchor="middle" style="font-size:${10 * k}px;stroke-width:${3 * k}px">${esc(wpShort(c.symbol))}</text>` : ""}</g>`;
     });
     bodies += `${kids.length ? `<circle class="orbit-ring" cx="${px}" cy="${py}" r="${orbitR}"/>` : ""}
-      <g class="wp-g${UI.mapSel === p.symbol ? " sel" : ""}" data-act="select-wp" data-wp="${esc(p.symbol)}"><title>${esc(p.symbol)} · ${esc(title(p.type))}${p.traits?.length ? ` · ${esc(p.traits.map(title).join(", "))}` : ""}</title>
-        ${marketSet.has(p.symbol) ? `<circle class="mk-market" cx="${px}" cy="${py}" r="${(st.r + 3.5) * k}"/>` : ""}${glyph(st, k, px, py)}
+      <g class="wp-g${UI.mapSel === p.symbol ? " sel" : ""}" data-act="select-wp" data-wp="${esc(p.symbol)}"><title>${tip(p)}</title>
+        ${marks(p, px, py, st.r * k)}${glyph(st, k, px, py)}
         <circle cx="${px}" cy="${py}" r="${12 * k}" fill="transparent"/>
-        <text class="lbl" x="${px}" y="${py + (st.r + (kids.length ? 22 : 14)) * k}" text-anchor="middle" style="font-size:${10 * k}px;stroke-width:${3 * k}px">${esc(wpShort(p.symbol))}</text></g>${kidsSvg}`;
+        <text class="lbl" x="${px}" y="${py + (st.r + (kids.length ? 25 : 16)) * k}" text-anchor="middle" style="font-size:${10 * k}px;stroke-width:${3 * k}px">${esc(wpShort(p.symbol))}</text></g>${kidsSvg}`;
+  }
+  const at = sym => pos.get(sym) ?? (bySym.get(sym) && [bySym.get(sym).x, -bySym.get(sym).y]);
+
+  // routine trade/mining routes, one line per waypoint pair, thicker with more ships on it
+  const routes = new Map();
+  for (const r of S.state?.routines ?? []) {
+    if (r.status !== "running") continue;
+    const sp = r.spec ?? {};
+    const pair = sp.kind === "trade" ? [sp.buyAt, sp.sellAt] : sp.kind === "mine" && sp.sellAt ? [sp.asteroid, sp.sellAt] : null;
+    if (!pair || sysOf(pair[0]) !== UI.mapSystem) continue;
+    const key = pair.join(">");
+    const e = routes.get(key) ?? routes.set(key, { pair, ships: [], goods: new Set(), kind: sp.kind }).get(key);
+    e.ships.push(r.ship);
+    e.goods.add(sp.kind === "trade" ? sp.good : "mining");
+  }
+  let routeSvg = "";
+  for (const { pair, ships: on, goods, kind } of routes.values()) {
+    const a = at(pair[0]), b = at(pair[1]);
+    if (!a || !b) continue;
+    // bow the line a little so A→B and B→A routes don't overlap
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2, dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1;
+    const qx = mx - (dy / len) * len * 0.12, qy = my + (dx / len) * len * 0.12;
+    routeSvg += `<path class="route-line ${kind}" d="M${a[0]},${a[1]} Q${qx},${qy} ${b[0]},${b[1]}" style="stroke-width:${Math.min(4, 1 + on.length * 0.5)}px"><title>${esc([...goods].join(", "))} · ${esc(wpShort(pair[0]))} → ${esc(wpShort(pair[1]))} · ${on.length} ship${on.length === 1 ? "" : "s"}: ${esc(on.join(", "))}</title></path>`;
   }
 
-  // ships: parked ships fan out around their waypoint; moving ships ride their route
+  // ships: a few parked ships fan out around their waypoint, a crowd collapses into one counter;
+  // moving ships ride their route
   let shipsSvg = "", lines = "";
-  const hull = (x, y, ang, label, moving, attrs = "") => `<g class="ship-mk${moving ? " moving" : ""}" ${attrs} transform="translate(${x} ${y})">${moving ? `<circle class="halo" r="${7 * k}"/>` : ""}<path class="hull" transform="rotate(${ang})" d="M${6 * k},0L${-4.5 * k},${4 * k}L${-2.5 * k},0L${-4.5 * k},${-4 * k}Z"/><text x="${7 * k}" y="${-6 * k}" style="font-size:${9 * k}px;stroke-width:${3 * k}px">${esc(label)}</text></g>`;
+  const hull = (x, y, ang, label, moving, attrs = "") => `<g class="ship-mk${moving ? " moving" : ""}" ${attrs} transform="translate(${x} ${y})">${moving ? `<circle class="halo" r="${7 * k}"/>` : ""}<path class="hull" transform="rotate(${ang})" d="M${6 * k},0L${-4.5 * k},${4 * k}L${-2.5 * k},0L${-4.5 * k},${-4 * k}Z"/>${label ? `<text x="${7 * k}" y="${-6 * k}" style="font-size:${9 * k}px;stroke-width:${3 * k}px">${esc(label)}</text>` : ""}</g>`;
   for (const [sym, list] of atWp) {
     const p = pos.get(sym);
     if (!p) continue;
+    if (list.length > 4) {
+      const x = p[0] + 17 * k, y = p[1] - 13 * k;
+      shipsSvg += `<g class="ship-mk crowd" transform="translate(${x} ${y})"><title>${esc(list.map(s => s.symbol).join(", "))}</title>${hull(0, 0, -90, "", false).replace('class="ship-mk"', 'class="ship-mk inner"')}<text x="${7 * k}" y="${3 * k}" style="font-size:${10 * k}px;stroke-width:${3 * k}px">×${list.length}</text></g>`;
+      continue;
+    }
     list.forEach((s, i) => {
       const a = -Math.PI / 4 + i * 0.9;
-      const r = 17 * k;
+      const r = 19 * k;
       shipsSvg += hull(p[0] + Math.cos(a) * r, p[1] + Math.sin(a) * r, -90, s.symbol.split("-").pop(), false);
     });
   }
+  const movingCount = fl.filter(s => s.nav?.route && !arrivedStale(s) && at(s.nav.route.from) && at(s.nav.route.to)).length;
   for (const s of fl) {
     const r = s.nav?.route;
     if (!r || arrivedStale(s)) continue;
-    const a = pos.get(r.from) ?? (bySym.get(r.from) && [bySym.get(r.from).x, -bySym.get(r.from).y]);
-    const b = pos.get(r.to) ?? (bySym.get(r.to) && [bySym.get(r.to).x, -bySym.get(r.to).y]);
+    const a = at(r.from), b = at(r.to);
     if (!a || !b) continue;
     const t0 = parseTs(r.departed), t1 = parseTs(r.arrival);
     const f = Math.max(0, Math.min(1, (Date.now() - t0) / (t1 - t0 || 1)));
     const ang = (Math.atan2(b[1] - a[1], b[0] - a[0]) * 180) / Math.PI;
     lines += `<line class="transit-line" x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}"/>`;
-    shipsSvg += hull(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, ang, s.symbol.split("-").pop(), true,
+    // with a big fleet in flight, labels only for the selected waypoint's traffic
+    const label = movingCount <= 12 || r.to === UI.mapSel || r.from === UI.mapSel ? s.symbol.split("-").pop() : "";
+    shipsSvg += hull(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, ang, label, true,
       `data-mv="${a[0]},${a[1]},${b[0]},${b[1]},${t0},${t1}"`);
   }
-  patch(svg, `<g>${rings}</g><g>${lines}</g><g>${bodies}</g><g>${shipsSvg}</g>`);
+  patch(svg, `<g>${rings}</g><g>${routeSvg}</g><g>${lines}</g><g>${bodies}</g><g>${shipsSvg}</g>`);
+}
+
+/** Running routines grouped by what they do, busiest first: [description, ships][]. */
+function routeGroups(list) {
+  const g = new Map();
+  for (const r of list) (g.get(routineBrief(r)) ?? g.set(routineBrief(r), []).get(routineBrief(r))).push(r.ship);
+  return [...g].sort((a, b) => b[1].length - a[1].length);
 }
 
 function renderMapDetail() {
   const box = $("#mapDetail");
-  if (!box) return;
-  const { bySym } = mapModel();
+  if (!box || UI.mapLevel !== "system") return;
+  const { wps, bySym } = mapModel();
   const w = bySym.get(UI.mapSel);
+  const extras = S.universe?.extras ?? {};
+  const inSys = s => (s.nav?.system ?? sysOf(s.nav?.waypoint)) === UI.mapSystem;
+  const shipRow = s => {
+    const r = routineOf(s.symbol);
+    const moving = s.nav?.route && !arrivedStale(s);
+    return `<div class="sched" style="grid-template-columns:auto minmax(0,1fr) auto;cursor:pointer" data-act="select-wp" data-wp="${esc(moving ? s.nav.route.to : s.nav?.waypoint)}"><span class="mono">${esc(s.symbol.split("-").pop())}</span><span class="dim mono" style="font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r?.label ?? "")}">${moving ? `→ ${esc(wpShort(s.nav.route.to))}` : `@ ${esc(wpShort(s.nav?.waypoint))}`}${r?.status === "running" ? ` · ${esc(routineBrief(r))}` : ""}</span>${statusBadge(s.nav?.status)}</div>`;
+  };
   if (!w) {
-    const fl = ships();
-    patch(box, `<header class="panel-head"><h2 class="panel-title">Ships</h2><div class="panel-aside">select a waypoint for detail</div></header><div class="panel-body flush">${fl.map(s =>
-      `<div class="sched" style="grid-template-columns:auto minmax(0,1fr) auto;cursor:pointer" data-act="select-wp" data-wp="${esc(s.nav?.route && !arrivedStale(s) ? s.nav.route.to : s.nav?.waypoint)}"><span class="mono">${esc(s.symbol)}</span><span class="dim mono" style="font-size:12px">${s.nav?.route && !arrivedStale(s) ? `→ ${esc(wpShort(s.nav.route.to))}` : `@ ${esc(wpShort(s.nav?.waypoint))}`}</span>${statusBadge(s.nav?.status)}</div>`).join("") || empty("No ships.")}</div>`);
+    const fl = ships().filter(inSys);
+    const row = galaxyModel().bySym.get(UI.mapSystem);
+    const count = t => wps.filter(x => x.traits?.includes(t) || (t === "SHIPYARD" && extras[x.symbol]?.shipyard)).length;
+    const gate = wps.find(x => x.type === "JUMP_GATE");
+    const running = (S.state?.routines ?? []).filter(r => r.status === "running" && fl.some(s => s.symbol === r.ship));
+    const byKind = {};
+    for (const r of running) byKind[r.spec?.kind] = (byKind[r.spec?.kind] ?? 0) + 1;
+    const earned = fl.reduce((a, s) => a + (s.earnings?.lastHour ?? 0), 0);
+    patch(box, `<header class="panel-head"><h2 class="panel-title">${esc(UI.mapSystem ?? "System")}</h2><div class="panel-aside">select a waypoint for detail</div></header>
+      <div class="panel-body detail-list">
+        <div class="dim" style="font-size:12.5px">${row ? `<i class="star-dot" style="background:${starStyle(row[3]).color}"></i> ${esc(starStyle(row[3]).label)} · ` : ""}${wps.length} waypoints known · ${count("MARKETPLACE")} markets · ${count("SHIPYARD")} shipyards${gate ? ` · gate ${esc(wpShort(gate.symbol))}${gate.isUnderConstruction ? ' <span class="warn">(under construction)</span>' : ""}` : ""}</div>
+        <div class="detail-row"><div class="k">Fleet here</div><div style="font-size:12.5px">${fl.length ? `${fl.length} ship${fl.length === 1 ? "" : "s"}${running.length ? ` · ${Object.entries(byKind).map(([kk, n]) => `${n} ${esc(kk)}`).join(", ")} routine${running.length === 1 ? "" : "s"}` : ""}${earned ? ` · <span class="${earned > 0 ? "good" : "bad"}">${esc(fmtSigned(earned))}</span> in the last hour` : ""}` : '<span class="muted">no ships in this system</span>'}</div></div>
+      </div>
+      <div class="panel-body flush map-ship-list" style="border-top:1px solid var(--line)">${fl.map(shipRow).join("") || empty("No ships here.")}</div>`);
     return;
   }
   const here = ships().filter(s => s.nav?.waypoint === w.symbol && (s.nav.status !== "IN_TRANSIT" || arrivedStale(s)));
   const inbound = ships().filter(s => s.nav?.route?.to === w.symbol && s.nav.status === "IN_TRANSIT" && !arrivedStale(s));
   const m = S.markets.find(x => x.symbol === w.symbol);
+  const ex = extras[w.symbol] ?? {};
+  const mods = ex.modifiers ?? w.modifiers ?? [];
+  const touching = (S.state?.routines ?? []).filter(r => r.status === "running" && [r.spec?.buyAt, r.spec?.sellAt, r.spec?.asteroid, r.spec?.destination].includes(w.symbol));
+  const c = ex.construction;
+  const yard = ex.shipyard;
+  const chip = list => (list.length > 6 ? `<div class="chips">${list.slice(0, 6).map(t => `<span class="tag">${esc(t)}</span>`).join("")}<span class="tag muted">+${list.length - 6}</span></div>` : `<div class="chips">${list.map(t => `<span class="tag">${esc(t)}</span>`).join("")}</div>`);
   patch(box, `<header class="panel-head"><h2 class="panel-title">${esc(wpShort(w.symbol))}</h2><div class="panel-aside"><button class="btn btn-sm btn-ghost" data-act="select-wp" data-wp="">close</button></div></header>
     <div class="panel-body detail-list">
-      <div><div class="mono" style="font-size:13px">${esc(w.symbol)}</div><div class="dim" style="font-size:12.5px">${esc(title(w.type))} · (${esc(w.x)}, ${esc(w.y)})${w.orbits ? ` · orbits ${esc(wpShort(w.orbits))}` : ""}${w.isUnderConstruction ? ' · <span class="warn">under construction</span>' : ""}</div></div>
+      <div><div class="mono" style="font-size:13px">${esc(w.symbol)}</div><div class="dim" style="font-size:12.5px">${esc(title(w.type))} · (${esc(w.x)}, ${esc(w.y)})${w.orbits ? ` · orbits ${esc(wpShort(w.orbits))}` : ""}${w.faction ? ` · ${esc(title(w.faction))}` : ""}${w.isUnderConstruction ? ' · <span class="warn">under construction</span>' : ""}</div></div>
+      ${mods.length ? `<div class="detail-row"><div class="k">Conditions${ex.modifiersAt ? ` · seen <span data-ago="${ex.modifiersAt}">${esc(fmtAgo(ex.modifiersAt))}</span>` : ""}</div><div class="chips">${mods.map(t => `<span class="tag small bad-tag">${esc(title(t))}</span>`).join("")}</div></div>` : ""}
       ${w.traits?.length ? `<div class="detail-row"><div class="k">Traits</div><div class="chips">${w.traits.map(t => `<span class="tag small">${esc(title(t))}</span>`).join("")}</div></div>` : ""}
-      <div class="detail-row"><div class="k">Ships here</div>${here.length || inbound.length ? `<div class="chips">${here.map(s => `<span class="tag">${esc(s.symbol)}</span>`).join("")}${inbound.map(s => `<span class="tag">${esc(s.symbol)} <b data-cd="${parseTs(s.nav.route.arrival)}">${esc(fmtCountdown(parseTs(s.nav.route.arrival)))}</b></span>`).join("")}</div>` : '<span class="muted" style="font-size:12.5px">none</span>'}</div>
-      ${m ? `<div class="detail-row"><div class="k">Market · seen <span data-ago="${m.fetchedAt}">${esc(fmtAgo(m.fetchedAt))}</span></div>${m.tradeGoods ? `<table class="table"><thead><tr><th>Good</th><th class="r">Buy</th><th class="r">Sell</th></tr></thead><tbody>${m.tradeGoods.map(g => `<tr><td><span class="type-chip type-${esc(g.type)}" title="${esc(g.type)}">${esc(g.type[0])}</span> <span class="mono" style="font-size:12px">${esc(g.symbol)}</span></td><td class="r num">${esc(fmtInt(g.purchasePrice))}</td><td class="r num">${esc(fmtInt(g.sellPrice))}</td></tr>`).join("")}</tbody></table>` : `<div class="dim" style="font-size:12.5px">${esc(m.note ?? "")}</div>`}<a href="#/markets" data-act="open-market" data-wp="${esc(w.symbol)}" style="font-size:12.5px">open in markets →</a></div>` : ""}
+      <div class="detail-row"><div class="k">Ships here</div>${here.length || inbound.length ? `${chip(here.map(s => s.symbol))}${inbound.length ? `<div class="chips" style="margin-top:4px">${inbound.map(s => `<span class="tag">${esc(s.symbol)} <b data-cd="${parseTs(s.nav.route.arrival)}">${esc(fmtCountdown(parseTs(s.nav.route.arrival)))}</b></span>`).join("")}</div>` : ""}` : '<span class="muted" style="font-size:12.5px">none</span>'}</div>
+      ${touching.length ? `<div class="detail-row"><div class="k">Routines using it</div>${routeGroups(touching).map(([what, on]) => `<div class="mono" style="font-size:12px" title="${esc(on.join(", "))}">${esc(what)} <span class="muted">· ${on.length === 1 ? esc(on[0]) : `${on.length} ships`}</span></div>`).join("")}</div>` : ""}
+      ${c ? `<div class="detail-row"><div class="k">Construction${c.isComplete ? " · complete" : ""} · read <span data-ago="${c.fetchedAt}">${esc(fmtAgo(c.fetchedAt))}</span></div>${c.materials.map(mt => `<div class="build-mat"><span class="mono">${esc(mt.good)}</span><span class="build-bar"><i style="width:${Math.min(100, (mt.fulfilled / (mt.required || 1)) * 100).toFixed(1)}%"></i></span><span class="num dim">${esc(fmtInt(mt.fulfilled))}/${esc(fmtInt(mt.required))}</span></div>`).join("")}</div>` : ""}
+      ${yard ? `<div class="detail-row"><div class="k">Shipyard${yard.offers.length ? ` · prices from <span data-ago="${Math.max(...yard.offers.map(o => o.ts))}">${esc(fmtAgo(Math.max(...yard.offers.map(o => o.ts))))}</span>` : ""}</div>${yard.offers.length ? `<table class="table"><thead><tr><th>Ship</th><th class="r">Price</th><th class="r">Cargo</th></tr></thead><tbody>${yard.offers.map(o => `<tr><td class="mono" style="font-size:12px">${esc(title(o.type.replace(/^SHIP_/, "")))}</td><td class="r num">${esc(fmtInt(o.price))}</td><td class="r num">${o.cargo ? esc(o.cargo) : '<span class="muted">—</span>'}</td></tr>`).join("")}</tbody></table>` : `<div class="dim" style="font-size:12.5px">Builds ${esc(yard.types.map(t => title(t.replace(/^SHIP_/, ""))).join(", ") || "unknown types")}; prices show once a ship docks here.</div>`}</div>` : ""}
+      ${m ? `<div class="detail-row"><div class="k">Market · ${m.tradeGoods && !m.live ? "prices from" : "seen"} <span data-ago="${m.pricesAt ?? m.fetchedAt}">${esc(fmtAgo(m.pricesAt ?? m.fetchedAt))}</span></div>${m.tradeGoods ? `<table class="table"><thead><tr><th>Good</th><th class="r">Buy</th><th class="r">Sell</th></tr></thead><tbody>${m.tradeGoods.map(g => `<tr><td><span class="type-chip type-${esc(g.type)}" title="${esc(g.type)}">${esc(g.type[0])}</span> <span class="mono" style="font-size:12px">${esc(g.symbol)}</span></td><td class="r num">${esc(fmtInt(g.purchasePrice))}</td><td class="r num">${esc(fmtInt(g.sellPrice))}</td></tr>`).join("")}</tbody></table>` : `<div class="dim" style="font-size:12.5px">${esc(m.note ?? "")}</div>`}<a href="#/markets" data-act="open-market" data-wp="${esc(w.symbol)}" style="font-size:12.5px">open in markets →</a></div>` : ""}
     </div>`);
 }
 
@@ -924,14 +1118,16 @@ function bindMapInteractions() {
   svg.addEventListener("pointerup", end);
   svg.addEventListener("pointercancel", () => { drag = null; svg.classList.remove("dragging"); });
   svg.addEventListener("wheel", e => {
-    if (!UI.mapView) return;
     e.preventDefault();
     const v = UI.mapView;
+    // scrolling out past the widest system zoom (or on an empty system) goes back to the galaxy
+    if (e.deltaY > 0 && (!v || v.w >= v.w0 * 2 * 0.999)) { mapLeaveOnce(); return; }
+    if (!v) return;
     const r = svg.getBoundingClientRect();
     const fx = (e.clientX - r.left) / r.width, fy = (e.clientY - r.top) / r.height;
     const wx = v.x + fx * v.w, wy = v.y + fy * v.h;
     const f = Math.exp(e.deltaY * 0.0015);
-    const nw = Math.max(v.w0 / 25, Math.min(v.w0 * 4, v.w * f));
+    const nw = Math.max(v.w0 / 25, Math.min(v.w0 * 2, v.w * f));
     const nh = (v.h * nw) / v.w;
     v.x = wx - fx * nw; v.y = wy - fy * nh; v.w = nw; v.h = nh;
     redraw();
@@ -965,35 +1161,6 @@ const sysOf = wp => String(wp ?? "").split("-").slice(0, 2).join("-");
 const sysShort = s => String(s ?? "").split("-")[1] ?? String(s ?? "");
 const GAL_COLORS = { fleet: "#f7a531", gate: "#43d392", known: "#53d3f5", sel: "#e6e9ef", label: "#a4aebe" };
 
-VIEWS.galaxy = {
-  needs: ["universe", "galaxy"],
-  mount() {
-    view().innerHTML = head("Galaxy", "Every system by position and star type. Fleet systems ringed in amber, known jump links in green. Drag to pan, scroll to zoom, double-click a system to open its map.",
-      '<input class="field" id="galSearch" placeholder="Find system…" autocomplete="off" spellcheck="false" style="width:180px">') +
-      `<div class="map-layout mount"><section class="panel map-stage" id="galStage"><canvas id="galCanvas" role="img" aria-label="Galaxy map"></canvas>
-        <div class="empty" id="galEmpty" hidden style="position:absolute;inset:40% 0 auto"></div>
-        <div class="map-hud"><button class="btn btn-sm" data-act="gal-fit">Whole galaxy</button><button class="btn btn-sm" data-act="gal-fleet">Fleet</button><button class="btn btn-sm" data-act="gal-zoom" data-f="1.6" aria-label="Zoom in">+</button><button class="btn btn-sm" data-act="gal-zoom" data-f="0.625" aria-label="Zoom out">−</button></div>
-        <div class="map-legend" id="galLegend"></div><div class="gal-status" id="galStatus"></div></section>
-        <section class="panel" id="galDetail"></section></div>`;
-    $("#galLegend").innerHTML = Object.entries(STAR).map(([, s]) => `<span><i class="star-dot" style="background:${s.color}"></i>${s.label}</span>`).join("") +
-      `<span><i class="star-dot ring" style="border-color:${GAL_COLORS.fleet}"></i>fleet</span><span><i class="star-line" style="background:${GAL_COLORS.gate}"></i>jump link</span>`;
-    $("#galSearch").addEventListener("keydown", e => {
-      if (e.key !== "Enter") return;
-      const q = e.target.value.trim().toUpperCase();
-      if (!q) return;
-      const { rows } = galaxyModel();
-      const hit = rows.find(r => r[0] === q) ?? rows.find(r => r[0].endsWith(`-${q}`)) ?? rows.find(r => r[0].includes(q));
-      if (!hit) { toast(`No system matches ${q}`, true); return; }
-      galSelect(hit[0], true);
-    });
-    bindGalaxyInteractions();
-  },
-  update() {
-    drawGalaxy();
-    renderGalaxyDetail();
-  },
-};
-
 let galCache = { src: null, model: null };
 function galaxyModel() {
   const src = S.galaxy;
@@ -1004,8 +1171,23 @@ function galaxyModel() {
   for (const r of rows) (byType.get(r[3]) ?? byType.set(r[3], []).get(r[3])).push(r);
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const r of rows) { minX = Math.min(minX, r[1]); maxX = Math.max(maxX, r[1]); minY = Math.min(minY, -r[2]); maxY = Math.max(maxY, -r[2]); }
-  galCache = { src, model: { rows, bySym, byType, bounds: rows.length ? { minX, maxX, minY, maxY } : null } };
+  galCache = { src, model: { rows, bySym, byType, bounds: rows.length ? { minX, maxX, minY, maxY } : null, spacing: typicalSpacing(rows) } };
   return galCache.model;
+}
+
+/** Median nearest-neighbour distance between systems, from a sample (sets how far the galaxy zooms). */
+function typicalSpacing(rows) {
+  if (rows.length < 2) return 0;
+  const step = Math.max(1, Math.floor(rows.length / 200));
+  const d = [];
+  for (let i = 0; i < rows.length; i += step) {
+    const a = rows[i];
+    let best = Infinity;
+    for (const b of rows) if (b !== a) best = Math.min(best, (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2);
+    if (best < Infinity && best > 0) d.push(Math.sqrt(best));
+  }
+  d.sort((x, y) => x - y);
+  return d[Math.floor(d.length / 2)] ?? 0;
 }
 
 /** Fleet presence per system: ships parked or cruising inside it, and ships jumping/warping between systems. */
@@ -1037,7 +1219,8 @@ function galEnsureView() {
   const fit = galFit(bounds, w, h);
   if (!UI.galView) UI.galView = { ...fit };
   UI.galView.min = fit.scale * 0.5;
-  UI.galView.max = fit.scale * 3000;
+  UI.galView.max = Math.max(fit.scale * 20, galaxyModel().spacing ? 360 / galaxyModel().spacing : fit.scale * 3000);
+  UI.galView.scale = Math.min(UI.galView.scale, UI.galView.max);
   return UI.galView;
 }
 
@@ -1054,7 +1237,7 @@ const galRedraw = () => { if (!galRaf) galRaf = requestAnimationFrame(() => { ga
 
 function drawGalaxy() {
   const canvas = $("#galCanvas");
-  if (!canvas) return;
+  if (!canvas || UI.mapLevel !== "galaxy") return;
   const { rows, bySym, byType } = galaxyModel();
   const st = S.universe?.galaxy;
   const emptyEl = $("#galEmpty");
@@ -1181,15 +1364,15 @@ function drawGalaxy() {
 }
 
 function renderGalaxyDetail() {
-  const box = $("#galDetail");
-  if (!box) return;
+  const box = $("#mapDetail");
+  if (!box || UI.mapLevel !== "galaxy") return;
   const { bySym, rows } = galaxyModel();
   const { at, moving } = galaxyFleet();
   const intel = S.universe?.intel ?? {};
   const links = S.universe?.gateLinks ?? [];
   const st = S.universe?.galaxy;
   const sel = UI.galSel && bySym.get(UI.galSel);
-  const sysLink = (sym, extra = "") => `<a href="#/galaxy" class="mono" data-act="gal-select" data-sys="${esc(sym)}">${esc(sym)}</a>${extra}`;
+  const sysLink = (sym, extra = "") => `<a href="#/map" class="mono" data-act="gal-select" data-sys="${esc(sym)}">${esc(sym)}</a>${extra}`;
   if (!sel) {
     const fleetSystems = [...at.entries()].sort((a, b) => b[1].length - a[1].length);
     const source = st?.complete ? (st.source === "dump" ? "bulk dump" : "system list") : "loading";
@@ -1217,7 +1400,7 @@ function renderGalaxyDetail() {
       <div class="detail-row"><div class="k">Harness knows</div><div style="font-size:12.5px">${info ? `${info.mapped ? "fully mapped" : info.scouted ? "scouted for shipyards and markets" : "system record only"}${info.markets || info.shipyards ? ` · ${info.markets} market${info.markets === 1 ? "" : "s"}, ${info.shipyards} shipyard${info.shipyards === 1 ? "" : "s"}` : ""}${info.gate ? " · has a jump gate" : ""}` : '<span class="muted">not read yet</span>'}</div></div>
       <div class="detail-row"><div class="k">Jump links</div>${neighbors.length ? `<div class="chips">${neighbors.map(n => `<span class="tag">${sysLink(n)}</span>`).join("")}</div>` : '<span class="muted" style="font-size:12.5px">none known</span>'}</div>
       <div class="detail-row"><div class="k">Ships here</div>${here.length || inbound.length ? `<div class="chips">${here.map(s => `<span class="tag">${esc(s.symbol)}</span>`).join("")}${inbound.map(m => `<span class="tag">${esc(m.s.symbol)} <b data-cd="${m.t1}">${esc(fmtCountdown(m.t1))}</b></span>`).join("")}</div>` : '<span class="muted" style="font-size:12.5px">none</span>'}</div>
-      <div><button class="btn btn-sm" data-act="gal-open" data-sys="${esc(sym)}">Open system map</button>${cached ? "" : '<div class="muted" style="font-size:12px;margin-top:6px">No waypoints cached for it yet; the map fills in once a ship or the collector reads them.</div>'}</div>
+      <div><button class="btn btn-sm btn-primary" data-act="map-enter" data-sys="${esc(sym)}">Open system map</button>${cached ? "" : '<div class="muted" style="font-size:12px;margin-top:6px">No waypoints cached for it yet; the map fills in once a ship or the collector reads them.</div>'}</div>
     </div>`);
 }
 
@@ -1304,20 +1487,26 @@ function bindGalaxyInteractions() {
   });
   c.addEventListener("pointercancel", () => { drag = null; c.classList.remove("dragging"); });
   c.addEventListener("pointerleave", () => { if (UI.galHover) { UI.galHover = null; galRedraw(); } });
-  c.addEventListener("dblclick", e => { const hit = galHit(e.clientX, e.clientY); if (hit) openSystemMap(hit); });
+  c.addEventListener("dblclick", e => { const hit = galHit(e.clientX, e.clientY); if (hit) mapEnter(hit); });
   c.addEventListener("wheel", e => {
     if (!UI.galView) return;
     e.preventDefault();
+    // already at full zoom and still scrolling in: open the system under the cursor
+    if (e.deltaY < 0 && UI.galView.scale >= UI.galView.max * 0.999) {
+      const hit = galHit(e.clientX, e.clientY, 90) ?? UI.galSel;
+      if (hit) { mapEnterOnce(hit); return; }
+    }
     const r = c.getBoundingClientRect();
     galZoomTo(UI.galView, UI.galView.scale * Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top);
     galRedraw();
   }, { passive: false });
 }
 
-function openSystemMap(sym) {
-  UI.mapSystem = sym; UI.mapView = null; UI.mapSel = null;
-  location.hash = "#/map";
-}
+// A trackpad fires dozens of wheel events per gesture; switch level once and
+// ignore the rest of that gesture so it doesn't bounce straight back.
+let levelSwitchAt = 0;
+function mapEnterOnce(sym) { if (Date.now() - levelSwitchAt > 600) { levelSwitchAt = Date.now(); mapEnter(sym); } }
+function mapLeaveOnce() { if (Date.now() - levelSwitchAt > 600) { levelSwitchAt = Date.now(); mapLeave(); } }
 
 // ---------------------------------------------------------------- markets
 VIEWS.markets = {
@@ -1350,7 +1539,7 @@ function renderOpps() {
   for (const m of S.markets) for (const g of m.tradeGoods ?? []) {
     if (q && !g.symbol.includes(q)) continue;
     const e = byGood.get(g.symbol) ?? byGood.set(g.symbol, { buys: [], sells: [] }).get(g.symbol);
-    const leg = { wp: m.symbol, supply: g.supply, vol: g.tradeVolume, at: m.fetchedAt };
+    const leg = { wp: m.symbol, supply: g.supply, vol: g.tradeVolume, at: m.pricesAt ?? m.fetchedAt };
     if (g.type !== "IMPORT") e.buys.push({ ...leg, price: g.purchasePrice });
     if (g.type !== "EXPORT") e.sells.push({ ...leg, price: g.sellPrice });
   }
@@ -1393,11 +1582,12 @@ function renderBrowser() {
   const series = new Map();
   for (const p of [...hist].sort((a, b) => a.ts - b.ts)) (series.get(p.good) ?? series.set(p.good, []).get(p.good)).push(p.purchasePrice);
   const goods = (m?.tradeGoods ?? []).filter(g => !q || g.symbol.includes(q));
-  return `<div class="market-layout">${panel("Markets", `<table class="table"><tbody>${list.map(x => `<tr class="clickable${x.symbol === UI.marketSel ? " selected" : ""}" data-act="select-market" data-wp="${esc(x.symbol)}"><td><span class="mono">${esc(wpShort(x.symbol))}</span><div class="muted" style="font-size:11.5px">${x.tradeGoods ? `${x.tradeGoods.length} goods` : "no prices"}</div></td><td class="r muted" style="font-size:12px" data-ago="${x.fetchedAt}">${esc(fmtAgo(x.fetchedAt))}</td></tr>`).join("")}</tbody></table>`, { bodyCls: "panel-body flush" })}
+  return `<div class="market-layout">${panel("Markets", `<table class="table"><tbody>${list.map(x => `<tr class="clickable${x.symbol === UI.marketSel ? " selected" : ""}" data-act="select-market" data-wp="${esc(x.symbol)}"><td><span class="mono">${esc(wpShort(x.symbol))}</span><div class="muted" style="font-size:11.5px">${x.tradeGoods ? `${x.tradeGoods.length} goods${x.live ? "" : " · last visit"}` : "no prices yet"}</div></td><td class="r muted" style="font-size:12px" data-ago="${x.pricesAt ?? x.fetchedAt}">${esc(fmtAgo(x.pricesAt ?? x.fetchedAt))}</td></tr>`).join("")}</tbody></table>`, { bodyCls: "panel-body flush" })}
     ${panel(esc(m?.symbol ?? "—"), m?.tradeGoods ? `<div class="table-wrap"><table class="table"><thead><tr><th>Good</th><th>Type</th><th>Supply</th><th>Activity</th><th class="r">Buy</th><th class="r">Sell</th><th class="r">Volume</th><th>Buy price trend</th></tr></thead><tbody>${goods.map(g => `<tr>
         <td class="mono" style="font-size:12.5px">${esc(g.symbol)}</td><td><span class="type-chip type-${esc(g.type)}">${esc(g.type)}</span></td><td>${supplyPips(g.supply)}</td><td class="dim" style="font-size:12.5px">${esc(title(g.activity ?? "—"))}</td>
         <td class="r num">${esc(fmtInt(g.purchasePrice))}</td><td class="r num">${esc(fmtInt(g.sellPrice))}</td><td class="r num">${esc(fmtInt(g.tradeVolume))}</td><td>${spark(series.get(g.symbol) ?? [])}</td></tr>`).join("")}</tbody></table></div>`
-      : empty(esc(m?.note ?? "No prices for this market.")), { bodyCls: "panel-body flush", aside: m ? `seen <span data-ago="${m.fetchedAt}">${esc(fmtAgo(m.fetchedAt))}</span>` : "" })}</div>`;
+      : empty(esc(m?.note ?? "No prices for this market."), m && [...m.exports, ...m.imports, ...m.exchange].length ? esc(`Trades ${[...m.exports.map(g => `${g} (export)`), ...m.imports.map(g => `${g} (import)`), ...m.exchange].join(", ")}`) : ""),
+      { bodyCls: "panel-body flush", aside: m ? (m.live || !m.tradeGoods ? `seen <span data-ago="${m.fetchedAt}">${esc(fmtAgo(m.fetchedAt))}</span>` : `<span class="warn">no ship there now</span> · prices from <span data-ago="${m.pricesAt}">${esc(fmtAgo(m.pricesAt))}</span>`) : "" })}</div>`;
 }
 
 // ---------------------------------------------------------------- contracts
@@ -1560,6 +1750,8 @@ document.addEventListener("click", async e => {
   switch (act) {
     case "range": UI.creditRange = Number(el.dataset.h); VIEWS.overview.update(); break;
     case "lb-tab": UI.lbTab = el.dataset.k; renderLeaderboard(); break;
+    case "now-reason": UI.nowReasonOpen = !UI.nowReasonOpen; VIEWS.overview.update(); break;
+    case "transcript-reason": UI.transcriptReasonOpen = !UI.transcriptReasonOpen; VIEWS.activity.update(); break;
     case "goto": location.hash = el.dataset.href; break;
     case "fleet-filter": UI.fleetFilter = el.dataset.k; VIEWS.fleet.update(); break;
     case "pick-wake": {
@@ -1579,9 +1771,10 @@ document.addEventListener("click", async e => {
       break;
     }
     case "select-wp": if (!el.closest("#mapSvg")) selectWp(el.dataset.wp); break;
+    case "map-enter": e.preventDefault(); mapEnter(el.dataset.sys); break;
+    case "map-leave": e.preventDefault(); mapLeave(); break;
     case "map-reset": UI.mapView = null; renderMap(); break;
     case "gal-select": e.preventDefault(); galSelect(el.dataset.sys, true); break;
-    case "gal-open": openSystemMap(el.dataset.sys); break;
     case "gal-fit": UI.galView = null; drawGalaxy(); break;
     case "gal-fleet": galFleetView(); break;
     case "gal-zoom": if (galEnsureView()) { const { w, h } = galSize(); galZoomTo(UI.galView, UI.galView.scale * Number(el.dataset.f), w / 2, h / 2); drawGalaxy(); } break;
@@ -1614,7 +1807,8 @@ $("#btnWake").addEventListener("click", wakeNow);
 // ================================================================ router
 
 async function route() {
-  const [name, arg] = location.hash.replace(/^#\/?/, "").split("/");
+  let [name, arg] = location.hash.replace(/^#\/?/, "").split("/");
+  if (name === "galaxy") { name = "map"; UI.mapLevel = "galaxy"; UI.mapLevelChosen = true; history.replaceState(null, "", "#/map"); }
   const next = VIEWS[name] ? name : "overview";
   if (next === "activity") UI.selWake = arg ? Number(arg) || null : null;
   const changed = next !== UI.view || !view().childElementCount;
@@ -1703,7 +1897,7 @@ setInterval(() => {
     el.setAttribute("transform", `translate(${x0 + (x1 - x0) * f} ${y0 + (y1 - y0) * f})`);
   }
   // ships crossing between systems move along their line on the galaxy canvas
-  if (UI.view === "galaxy" && !document.hidden && galaxyFleet().moving.length) galRedraw();
+  if (UI.view === "map" && UI.mapLevel === "galaxy" && !document.hidden && galaxyFleet().moving.length) galRedraw();
   renderLink();
 }, 1000);
 
@@ -1715,8 +1909,7 @@ window.addEventListener("resize", () => {
   clearTimeout(resizeT);
   resizeT = setTimeout(() => {
     if (UI.view === "overview") VIEWS.overview.update();
-    if (UI.view === "map") { UI.mapView = null; renderMap(); }
-    if (UI.view === "galaxy") drawGalaxy();
+    if (UI.view === "map") { UI.mapView = null; renderMap(); drawGalaxy(); }
   }, 150);
 });
 

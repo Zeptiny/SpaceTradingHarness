@@ -39,6 +39,9 @@ const { scheduler } = await import("./agent/scheduler.js");
 const { startPanel } = await import("./panel/server.js");
 const { galaxy } = await import("./state/galaxy.js");
 const { atlas } = await import("./state/atlas.js");
+const { routines } = await import("./state/routines.js");
+const { earnings } = await import("./state/earnings.js");
+const { shipyards } = await import("./state/shipyards.js");
 await import("./tools/read.js");
 await import("./tools/actions.js");
 await import("./tools/internal.js");
@@ -208,7 +211,8 @@ for (const suffix of Object.keys(marketSpecs)) {
   }
   const m = buildMarket(suffix);
   prices.record(m, now - rand(2, 40) * MIN);
-  mirror.set(storeKeys.market(SYS, wp(suffix)), m);
+  // J60 was last read with no ship present: no live prices, so the panel falls back to the price history.
+  mirror.set(storeKeys.market(SYS, wp(suffix)), suffix === "J60" ? { ...m, tradeGoods: undefined } : m);
 }
 
 // ---------------------------------------------------------------- agent & credits
@@ -307,6 +311,47 @@ const fleet: Ship[] = [
   };
   fleet.push(probe);
 }
+// A trading fleet on routines, so the overview table scrolls and the map shows routes and crowds.
+{
+  const lanes: [good: string, buyAt: string, sellAt: string][] = [
+    ["ELECTRONICS", wp("D40"), wp("A1")], ["MACHINERY", wp("D40"), wp("A1")], ["IRON", wp("H51"), wp("A1")],
+    ["FOOD", wp("A1"), wp("J60")], ["COPPER", wp("H51"), wp("D40")],
+  ];
+  for (let i = 0; i < 26; i++) {
+    const [good, buyAt, sellAt] = lanes[i % lanes.length]!;
+    const n = 8 + i;
+    const moving = i % 3 === 0;
+    const ship = mkShip({
+      n, role: "HAULER", frame: "FRAME_LIGHT_FREIGHTER", at: moving ? sellAt : i % 2 ? buyAt : wp("D40"),
+      status: moving ? "IN_TRANSIT" : "DOCKED", fuel: [Math.round(rand(150, 600)), 600], cargo: moving ? [[good, 40]] : [], capacity: 80, speed: 30,
+      ...(moving ? { route: { from: buyAt, to: sellAt, departed: now - rand(1, 5) * MIN, arrival: now + rand(2, 12) * MIN } } : {}),
+    });
+    fleet.push(ship);
+    routines.start(ship.symbol, { kind: "trade", good, buyAt, sellAt, minMarginPerUnit: 150 });
+    routines.update(ship.symbol, { trips: Math.floor(rand(0, 9)), profit: Math.round(rand(-5_000, 60_000)), phase: moving ? `flying to ${sellAt}` : `buying ${good}` });
+    earnings.track([ship.symbol]);
+    for (let k = 0; k < 4; k++) earnings.record(ship.symbol, Math.round(rand(-2_000, 9_000)), "trade");
+  }
+  routines.start(`${AGENT}-3`, { kind: "mine", asteroid: wp("F45"), sellAt: wp("H51") });
+  routines.update(`${AGENT}-3`, { trips: 3, profit: 4_210, phase: "extracting" });
+  routines.start(`${AGENT}-5`, { kind: "trade", good: "IRON_ORE", buyAt: wp("F45"), sellAt: wp("H51") });
+  routines.end(`${AGENT}-5`, "stopped", `margin -12/unit (${wp("F45")} 44 → ${wp("H51")} 32) is below the 20 floor`);
+}
+earnings.recordPurchase(`${AGENT}-4`, 310_000);
+for (const s of ["-1", "-3", "-4", "-6"]) for (let k = 0; k < 3; k++) earnings.record(`${AGENT}${s}`, Math.round(rand(500, 6_000)), "trade");
+
+// Shipyard A1 was read with a ship present (prices remembered); A3 only lists what it builds.
+shipyards.record({
+  symbol: wp("A1"), modificationsFee: 0, shipTypes: [],
+  ships: [["SHIP_PROBE", 60_558, 0, 3], ["SHIP_LIGHT_SHUTTLE", 238_345, 40, 10], ["SHIP_LIGHT_HAULER", 353_958, 80, 30]].map(([type, price, cargo, speed]) => ({
+    type, purchasePrice: price, supply: "MODERATE", engine: { speed }, modules: cargo ? [{ symbol: "MODULE_CARGO_HOLD_II", capacity: cargo }] : [],
+  })),
+} as never);
+mirror.set(storeKeys.shipyard(SYS, wp("A3")), { symbol: wp("A3"), shipTypes: [{ type: "SHIP_MINING_DRONE" }, { type: "SHIP_SURVEYOR" }], modificationsFee: 0 } as never);
+atlas.recordModifiers(wp("G52"), [{ symbol: "STRIPPED", name: "Stripped", description: "" }] as never);
+atlas.recordConstruction({ symbol: wp("I53"), isComplete: false, materials: [
+  { tradeSymbol: "FAB_MATS", required: 4_000, fulfilled: 1_240 }, { tradeSymbol: "ADVANCED_CIRCUITRY", required: 1_200, fulfilled: 610 }, { tradeSymbol: "QUANTUM_STABILIZERS", required: 1, fulfilled: 1 },
+] } as never);
 mirror.set(storeKeys.fleet, { ships: fleet });
 
 // ---------------------------------------------------------------- contracts
@@ -570,7 +615,11 @@ bus.subscribe(e => {
   else if (e.command === "directive") scheduler.setDirective(e.text ?? null);
 });
 
-scheduler.schedule(now + 25_000, "NYUU-3 extraction cooldown done", "NYUU-3");
+// A pile-up of routine stops, like a real wake after a margin collapse, to exercise the Agent · now card.
+scheduler.schedule(now + 25_000, ["resumed by user", ...[9, 12, 15, 18, 21, 24, 27, 30].map((n, i) => {
+  const [good, a, b] = ([["ELECTRONICS", "D40", "A1"], ["IRON", "H51", "A1"], ["COPPER", "H51", "D40"], ["FOOD", "A1", "J60"]] as const)[i % 4]!;
+  return `${AGENT}-${n} routine stopped (trade ${good} ${wp(a)} → ${wp(b)}): margin -${100 + i * 37}/unit (${wp(a)} ${2400 + i * 11} → ${wp(b)} ${2300 - i * 13}) is below the ${150 + i * 20} floor`;
+}), `${AGENT}-3 extraction cooldown done`].join("; "));
 scheduler.schedule(now + 3.5 * MIN + 2_000, "NYUU-4 arrival at X1-KD26-H51", "NYUU-4");
 scheduler.schedule(now + 11 * MIN + 2_000, "NYUU-6 arrival at X1-KD26-A1", "NYUU-6");
 
