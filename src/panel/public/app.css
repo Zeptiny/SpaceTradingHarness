@@ -357,7 +357,24 @@ textarea.field { height: auto; padding: 9px 11px; resize: vertical; line-height:
 
 /* ------------------------------------------------------------------ overview */
 
-.now-card { display: flex; flex-direction: column; gap: 10px; }
+.now-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.now-reason { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.reason-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.reason-list li {
+  font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  padding-left: 10px; position: relative;
+}
+.reason-list li::before { content: ""; position: absolute; left: 0; top: 0.62em; width: 4px; height: 4px; border-radius: 50%; background: var(--line-2); }
+.reason-list .mono { font-size: 11.5px; color: var(--text); }
+.reason-more { align-self: flex-start; height: 22px; padding: 0 6px; font-size: 11.5px; margin-left: 4px; }
+.transcript-reasons { margin: 4px 0 2px; }
+/* the overview fleet table scrolls inside the card so a big fleet doesn't stretch the page */
+.fleet-scroll { max-height: 460px; overflow: auto; }
+.fleet-scroll thead th { position: sticky; top: 0; z-index: 1; background: var(--panel); }
+.job-cell { max-width: 240px; }
+.job { display: block; font-family: var(--font-mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.job.stopped { color: var(--muted); }
+.job-sub { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .thought {
   position: relative; margin: 0; padding: 12px 14px 12px 16px;
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 8px;
@@ -400,6 +417,13 @@ textarea.field { height: auto; padding: 9px 11px; resize: vertical; line-height:
 .mini-fleet td:first-child { font-family: var(--font-mono); font-size: 12.5px; }
 
 /* ------------------------------------------------------------------ fleet */
+
+.ship-job { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 12px; min-width: 0; }
+.ship-job .mono { font-size: 12px; color: var(--text); }
+.ship-job.stopped .mono { color: var(--muted); }
+.ship-earn { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
+.ship-earn b { font-family: var(--font-mono); font-weight: 500; color: var(--text-2); }
+.ship-earn b.good { color: var(--good); } .ship-earn b.bad { color: var(--bad); }
 
 .ships { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: var(--gap); }
 .ship { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
@@ -501,7 +525,36 @@ pre.json .k { color: var(--blue); } pre.json .s { color: #b7e4a0; } pre.json .n 
 .map-stage canvas { display: block; width: 100%; height: min(72vh, 760px); cursor: grab; touch-action: none;
   background: radial-gradient(ellipse at center, rgba(142, 167, 255, 0.05), transparent 70%); }
 .map-stage canvas.dragging { cursor: grabbing; }
-.gal-status { position: absolute; left: 12px; top: 12px; }
+.gal-status { position: absolute; right: 12px; top: 12px; }
+/* one stage, two levels: the galaxy canvas or a system's SVG */
+.map-stage[data-level="galaxy"] svg, .map-stage[data-level="galaxy"] #mapEmpty { display: none; }
+.map-stage[data-level="system"] canvas, .map-stage[data-level="system"] #galEmpty, .map-stage[data-level="system"] .gal-status { display: none; }
+.map-stage.zoom-in svg { animation: map-in 380ms cubic-bezier(.2, .7, .2, 1); }
+.map-stage.zoom-out canvas { animation: map-out 380ms cubic-bezier(.2, .7, .2, 1); }
+@keyframes map-in { from { opacity: 0; transform: scale(0.35); } to { opacity: 1; transform: none; } }
+@keyframes map-out { from { opacity: 0; transform: scale(2.4); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .map-stage.zoom-in svg, .map-stage.zoom-out canvas { animation: none; } }
+.map-empty { position: absolute; inset: 40% 0 auto; }
+.map-crumbs {
+  position: absolute; left: 12px; top: 12px; display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: rgba(7, 9, 13, 0.72); backdrop-filter: blur(4px); font-size: 12.5px;
+}
+.map-crumbs b { color: var(--text); font-weight: 600; }
+.map-crumbs .sep { color: var(--muted); }
+.map-ship-list { max-height: 46vh; overflow: auto; }
+.mk-yard { fill: none; stroke: var(--cyan); stroke-width: 1.2; stroke-dasharray: 3 2; vector-effect: non-scaling-stroke; opacity: 0.8; }
+.mk-build { fill: none; stroke: var(--warn); stroke-width: 1; stroke-dasharray: 1 3; vector-effect: non-scaling-stroke; opacity: 0.8; }
+.mk-depleted { fill: var(--bad); stroke: var(--bg); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.route-line { fill: none; stroke: var(--accent); stroke-dasharray: 2 5; stroke-linecap: round; vector-effect: non-scaling-stroke; opacity: 0.45; }
+.route-line.mine { stroke: #c9a86a; }
+.route-line:hover { opacity: 0.9; }
+.star-line.dashed { background: repeating-linear-gradient(90deg, var(--accent) 0 2px, transparent 2px 5px); }
+.ship-mk.crowd text { fill: var(--cyan); }
+.bad-tag { color: var(--bad); border-color: rgba(255, 107, 107, 0.35); background: var(--bad-wash); }
+.build-mat { display: grid; grid-template-columns: minmax(0, 1fr) 70px auto; gap: 8px; align-items: center; font-size: 12px; }
+.build-bar { height: 5px; border-radius: 3px; background: var(--raised); overflow: hidden; }
+.build-bar i { display: block; height: 100%; background: var(--warn); }
 .star-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; }
 .star-dot.ring { background: none; border: 2px solid; width: 10px; height: 10px; }
 .star-line { display: inline-block; width: 14px; height: 2px; vertical-align: middle; }

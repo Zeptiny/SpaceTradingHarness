@@ -63,6 +63,11 @@ class ShipyardMemory {
     }
     return [...best.values()].sort((a, b) => a.price - b.price);
   }
+
+  /** Every remembered offer (for the panel). */
+  all(): ShipOffer[] {
+    return Object.values(this.offers);
+  }
 }
 
 export const shipyards = new ShipyardMemory();
